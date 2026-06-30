@@ -1,5 +1,13 @@
-#include <stdio.h>
+#include "gl.h"
+
+#include <GLFW/glfw3.h>
 
 int main() {
-    printf("Hello world\n");
+    gl_init();
+
+    while (!window_should_close()) {
+        gl_run();
+        glfwPollEvents();
+    }
+    gl_close();
 }
