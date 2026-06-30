@@ -1,0 +1,9 @@
+CompileFlags:
+  Add: [-std=gnu99]
+  Remove: [-std=c99]
+
+Index:
+  Background: Build
+
+Diagnostics:
+  UnusedIncludes: None

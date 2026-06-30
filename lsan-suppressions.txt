@@ -1,0 +1,15 @@
+leak:glad
+leak:libGL
+leak:libEGL
+leak:pango
+leak:gtk
+leak:libdecor
+leak:fontconfig
+leak:FcPattern
+leak:FcConfig
+leak:expat
+leak:glib
+leak:g_thread
+leak:dbus
+leak:wayland
+leak:wl_proxy

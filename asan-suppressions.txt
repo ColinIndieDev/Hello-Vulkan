@@ -1,0 +1,2 @@
+interceptor_via_lib:glad
+interceptor_via_lib:libGL

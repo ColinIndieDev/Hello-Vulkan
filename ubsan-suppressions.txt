@@ -1,0 +1,1 @@
+function:glad_gl_load_impl
