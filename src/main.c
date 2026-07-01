@@ -1,13 +1,18 @@
 #include "gl.h"
 
-#include <GLFW/glfw3.h>
+#include <stdio.h>
 
-int main() {
-    gl_init();
+int main(void) {
+    enable_vsync(false);
 
+    window_init(800, 800, "Hello Triangle!");
     while (!window_should_close()) {
-        gl_run();
-        glfwPollEvents();
+        clear_background(RGB(10, 10, 10));
+        begin_draw();
+    
+        draw_rect(VEC2F(100, 100), VEC2F(400, 300), RGB(255, 255, 0));
+
+        end_draw();
     }
-    gl_close();
+    window_close();
 }

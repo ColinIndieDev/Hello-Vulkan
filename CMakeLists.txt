@@ -81,35 +81,9 @@ set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
 set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
 
-set(SHADERC_SKIP_THIRD_PARTY_CHECK ON CACHE BOOL "" FORCE)
-
 set(SHADERC_SKIP_TESTS ON CACHE BOOL "" FORCE)
 set(SHADERC_SKIP_EXAMPLES ON CACHE BOOL "" FORCE)
 set(SHADERC_SKIP_COPYRIGHT_CHECK ON CACHE BOOL "" FORCE)
-
-FetchContent_Declare(
-    spirv-headers
-    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
-    GIT_TAG        main
-)
-
-FetchContent_Declare(
-    spirv-tools
-    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Tools.git
-    GIT_TAG        main
-)
-
-FetchContent_Declare(
-    glslang
-    GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
-    GIT_TAG        main
-)
-
-FetchContent_Declare(
-    shaderc
-    GIT_REPOSITORY https://github.com/google/shaderc.git
-    GIT_TAG main
-)
 
 # Volk
 FetchContent_Declare(
@@ -125,7 +99,7 @@ FetchContent_Declare(
     GIT_TAG        master
 )
 
-FetchContent_MakeAvailable(spirv-headers spirv-tools glslang shaderc volk vma)
+FetchContent_MakeAvailable(volk vma)
 
 # }}}
 
@@ -159,7 +133,15 @@ find_package(Threads REQUIRED)
 # Vulkan
 find_package(Vulkan REQUIRED)
 
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Threads::Threads Vulkan::Vulkan shaderc volk VulkanMemoryAllocator)
+# shaderc
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SHADERC REQUIRED shaderc)
+
+# cpstd
+find_package(cpstd REQUIRED)
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${SHADERC_INCLUDE_DIRS})
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Threads::Threads Vulkan::Vulkan ${SHADERC_LIBRARIES} volk VulkanMemoryAllocator cpstd::cpstd)
 
 # }}}
 

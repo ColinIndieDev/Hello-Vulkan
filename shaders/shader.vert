@@ -1,20 +1,28 @@
 #version 450
 
-vec2 positions[3] = vec2[](
-    vec2(0.0, -0.5),  
-    vec2(0.5, 0.5),   
-    vec2(-0.5, 0.5)   
-);
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
 
-vec3 colors[3] = vec3[](
-    vec3(1.0, 0.0, 0.0), 
-    vec3(0.0, 1.0, 0.0), 
-    vec3(0.0, 0.0, 1.0)  
-);
+struct vertex {
+    vec3 pos;
+    vec4 color;
+};
 
-layout(location = 0) out vec3 fragColor;
+layout (buffer_reference, std430, scalar) readonly buffer vertex_buffer_ref {
+    vertex vertices[];
+};
+
+layout (push_constant) uniform PushConstants {
+    vertex_buffer_ref vertex_buffer;
+    layout(row_major) mat4 projection;
+} push;
+
+layout(location = 0) out vec4 frag_color;
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    fragColor = colors[gl_VertexIndex];
+    vertex v = push.vertex_buffer.vertices[gl_VertexIndex];
+
+    vec4 position = vec4(v.pos, 1.0);
+    gl_Position = push.projection * position;
+    frag_color = v.color;
 }

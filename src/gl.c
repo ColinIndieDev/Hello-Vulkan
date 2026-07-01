@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+#include <vulkan/vulkan_core.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -13,13 +15,62 @@
 #include <vk_mem_alloc.h>
 #include <shaderc/shaderc.h>
 
+#include <cpstd/vector.h>
+
 #define VULKAN_VERSION VK_API_VERSION_1_4
 #define MAX_FRAME_IN_FLIGHT 2
 
-char *title = "Hello Vulkan!";
-
 GLFWwindow *window = NULL;
-uint32_t width = 800, height = 800;
+const char *title = "Hello World";
+uint32_t scr_width = 800, scr_height = 800;
+bool vsync = true;
+
+mat4f projection2D;
+
+color_t bg_color_norm = RGB(0, 0, 0);
+
+vertex *vertices = NULL;
+uint32_t world_vertices_cnt = 0;
+
+void enable_vsync(bool enabled) {
+    vsync = enabled;
+}
+
+// {{{ Time
+
+unsigned int nb_frames = 0;
+float last_time = 0.0f;
+
+float target_frame_time = 0.0f;
+unsigned int fps = 0;
+
+float get_time() {
+    static struct timespec start_ts;
+    static bool initialized = false;
+    struct timespec cur_ts;
+    if (!initialized) {
+        clock_gettime(CLOCK_MONOTONIC, &start_ts);
+        initialized = true;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &cur_ts);
+    return (float)((double)(cur_ts.tv_sec - start_ts.tv_sec) + ((double)(cur_ts.tv_nsec - start_ts.tv_nsec) * 1e-9));
+}
+void calc_fps() {
+    float cur_time = get_time();
+    nb_frames++;
+    if (cur_time - last_time >= 1.0) {
+        fps = nb_frames;
+        nb_frames = 0;
+        last_time += 1.0f;
+    }
+}
+unsigned int get_fps() { 
+    return fps; 
+}
+
+// }}}
+
+// {{{ Vulkan Variables
 
 VkInstance instance = NULL;
 VkSurfaceKHR surface = NULL;
@@ -69,8 +120,19 @@ frame_resources_t frame_resources[MAX_FRAME_IN_FLIGHT] = {
         .img_aquired_sem = NULL
     }
 };
+frame_resources_t *cur_res = NULL;
+uint32_t cur_img_idx = 0;
+uint64_t cur_frame_id = 0; 
 
-void gl_create_instance() {
+VkBuffer vertex_buffer = NULL;
+VmaAllocation vertex_buffer_alloc = NULL;
+uint64_t vertex_buffer_addr = 0;
+
+// }}}
+
+// {{{ vulkan_init() Helper
+
+void vulkan_create_instance() {
     if (volkInitialize() != VK_SUCCESS) {
         fprintf(stderr, "Failed to init Volk!\n");
         exit(-1);
@@ -106,14 +168,14 @@ void gl_create_instance() {
     volkLoadInstance(instance);
 }
 
-void gl_create_surface() {
+void vulkan_create_surface() {
     if (glfwCreateWindowSurface(instance, window, NULL, &surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface!\n");
         exit(-1);
     }
 }
 
-void gl_find_physical_device() {
+void vulkan_find_physical_device() {
     uint32_t device_cnt = 0;
     vkEnumeratePhysicalDevices(instance, &device_cnt, NULL);
     VkPhysicalDevice devices[device_cnt];
@@ -131,6 +193,10 @@ void gl_find_physical_device() {
             }
         }
     }
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physical_device, &props);
+    printf("Found GPU: %s!\n", props.deviceName);
 
     uint32_t fmt_cnt = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &fmt_cnt, NULL);
@@ -178,7 +244,7 @@ void gl_find_physical_device() {
     }
 }
 
-void gl_find_graphics_queue() {
+void vulkan_find_graphics_queue() {
     uint32_t queue_fam_cnt = 0;
     vkGetPhysicalDeviceQueueFamilyProperties2(physical_device, &queue_fam_cnt, NULL);
     VkQueueFamilyProperties2 queue_fam_props[queue_fam_cnt];
@@ -200,7 +266,7 @@ void gl_find_graphics_queue() {
     exit(-1);
 }
 
-void gl_create_device() {
+void vulkan_create_device() {
     float priority = 1.0f;
     uint32_t queue_families[1] = {
         gfx_queue_fam_idx
@@ -232,7 +298,8 @@ void gl_create_device() {
     };
     vkGetPhysicalDeviceFeatures2(physical_device, &supported_features);
 
-    if (!supported_features13.dynamicRendering || !supported_features13.synchronization2 || !supported_features12.timelineSemaphore) {
+    if (!supported_features13.dynamicRendering || !supported_features13.synchronization2 || 
+        !supported_features12.timelineSemaphore || !supported_features12.scalarBlockLayout || !supported_features12.bufferDeviceAddress) {
         fprintf(stderr, "Physical device does not meet feature requirements!\n");
         exit(-1);
     }
@@ -250,7 +317,9 @@ void gl_create_device() {
     VkPhysicalDeviceVulkan12Features features12 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
         .pNext = &features13,
-        .timelineSemaphore = VK_TRUE
+        .timelineSemaphore = VK_TRUE,
+        .scalarBlockLayout = VK_TRUE,
+        .bufferDeviceAddress = VK_TRUE
     };
 
     VkPhysicalDeviceFeatures2 features = {
@@ -283,7 +352,7 @@ void gl_create_device() {
     }
 }
 
-void gl_init_vma() {
+void vulkan_init_vma() {
     VmaVulkanFunctions vma_func_info;
 	VmaAllocatorCreateInfo vma_alloc_info = {
 		.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
@@ -302,7 +371,7 @@ void gl_init_vma() {
 	} 
 }
 
-void gl_create_swapchain(uint32_t w, uint32_t h) {
+void vulkan_create_swapchain(uint32_t w, uint32_t h) {
     swapchain_width = w;
 	swapchain_height = h;
 
@@ -326,7 +395,7 @@ void gl_create_swapchain(uint32_t w, uint32_t h) {
 		.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 		.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
 		.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-		.presentMode = VK_PRESENT_MODE_FIFO_KHR
+		.presentMode = vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR
 	};
 
 	if (vkCreateSwapchainKHR(device, &swapchain_create_info, NULL, &swapchain) != VK_SUCCESS) {
@@ -412,7 +481,7 @@ void gl_create_swapchain(uint32_t w, uint32_t h) {
 	}
 }
 
-void gl_destroy_swapchain() {
+void vulkan_destroy_swapchain() {
     for (int i = 0; i < img_cnt; i++) {
 		vkDestroyImageView(device, swapchain_img_views[i], NULL);
 	}
@@ -435,7 +504,7 @@ void gl_destroy_swapchain() {
 	}
 }
 
-char *gl_shader_read_file(char *path) {
+char *vulkan_shader_read_file(char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         return NULL;
@@ -463,11 +532,11 @@ char *gl_shader_read_file(char *path) {
     return buffer;
 }
 
-VkShaderModule gl_create_shader_mod(char *path, char *name, shaderc_shader_kind kind) {
+VkShaderModule vulkan_create_shader_mod(char *path, char *name, shaderc_shader_kind kind) {
     char *final_path = malloc(strlen(path) + strlen(name) + 1);
     strcpy(final_path, path);
     strcat(final_path, name);
-    char *src = gl_shader_read_file(final_path);
+    const char *src = vulkan_shader_read_file(final_path);
 
     if (!src) {
         fprintf(stderr, "Cannot find shader src file: %s!\n", final_path);
@@ -506,9 +575,9 @@ VkShaderModule gl_create_shader_mod(char *path, char *name, shaderc_shader_kind 
 	return shader_mod;
 }
 
-void gl_create_shader(char *vert_path, char *vert_name, char *frag_path, char *frag_name) {
-    vert_shader = gl_create_shader_mod(vert_path, vert_name, shaderc_vertex_shader);
-    frag_shader = gl_create_shader_mod(frag_path, frag_name, shaderc_fragment_shader);
+void vulkan_create_shader(char *vert_path, char *vert_name, char *frag_path, char *frag_name) {
+    vert_shader = vulkan_create_shader_mod(vert_path, vert_name, shaderc_vertex_shader);
+    frag_shader = vulkan_create_shader_mod(frag_path, frag_name, shaderc_fragment_shader);
 
     if (!vert_shader || !frag_shader) {
         fprintf(stderr, "Error creating shader!\n");
@@ -516,7 +585,7 @@ void gl_create_shader(char *vert_path, char *vert_name, char *frag_path, char *f
     }
 }
 
-void gl_create_gfx_pipeline() {
+void vulkan_create_gfx_pipeline() {
 	char *entry_point = "main";
 	VkPipelineShaderStageCreateInfo shader_stages[2] = {
 		{
@@ -597,11 +666,18 @@ void gl_create_gfx_pipeline() {
 		.depthAttachmentFormat = depth_fmt,
 	};
 
+    // Push constants
+    VkPushConstantRange push_const_range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(shader_push_consts_t) + 8 // idk some shit padding
+    };
+
 	VkPipelineLayoutCreateInfo pipeline_layout_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = 0,
-		.pushConstantRangeCount = 0,
-		.pPushConstantRanges = NULL
+		.pushConstantRangeCount = 1,
+		.pPushConstantRanges = &push_const_range
 	};
 	if (vkCreatePipelineLayout(device, &pipeline_layout_info, NULL, &pipeline_layout) != VK_SUCCESS) {
 		fprintf(stderr, "Unable to create pipeline layout!\n");
@@ -629,7 +705,7 @@ void gl_create_gfx_pipeline() {
 	}
 }
 
-void gl_create_sync_resources() {
+void vulkan_create_sync_resources() {
     VkSemaphoreTypeCreateInfo sem_type_info = {
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
 		.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
@@ -657,7 +733,7 @@ void gl_create_sync_resources() {
 	}
 }
 
-void gl_create_command_buffers() {
+void vulkan_create_command_buffers() {
     VkCommandPoolCreateInfo poolInfo = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 		.queueFamilyIndex = gfx_queue_fam_idx
@@ -690,30 +766,61 @@ void gl_create_command_buffers() {
 	}
 }
 
-void gl_init() {
+// }}}
+
+void vulkan_init() {
+    vulkan_create_instance();
+    vulkan_create_surface();
+    vulkan_find_physical_device();
+    vulkan_find_graphics_queue();
+    vulkan_create_device();
+    volkLoadDevice(device);
+    vulkan_init_vma();
+    vulkan_create_swapchain(scr_width, scr_height);
+
+    vulkan_create_shader("shaders/", "shader.vert", "shaders/", "shader.frag");
+
+    vulkan_create_gfx_pipeline();
+    vulkan_create_sync_resources();
+    vulkan_create_command_buffers();
+}
+
+void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
+    (void)window;
+    scr_width = (uint32_t)width;
+    scr_height = (uint32_t)height;
+
+    req_swapchain_recreate = true;
+
+    mat4f_ortho(&projection2D, 0.0f, (float)scr_width,(float)scr_height, 0.0f, -1.0f, 1.0f);
+}
+
+void window_init(uint32_t width, uint32_t height, const char *title) {
+    scr_width = width;
+    scr_height = height;
+    title = title;
+    
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    window = glfwCreateWindow((int)width, (int)height, title, NULL, NULL);
+    window = glfwCreateWindow((int)scr_width, (int)scr_height, title, NULL, NULL);
 
-    gl_create_instance();
-    gl_create_surface();
-    gl_find_physical_device();
-    gl_find_graphics_queue();
-    gl_create_device();
-    volkLoadDevice(device);
-    gl_init_vma();
-    gl_create_swapchain(width, height);
-    gl_create_shader("shaders/", "shader.vert", "shaders/", "shader.frag");
-    gl_create_gfx_pipeline();
-    gl_create_sync_resources();
-    gl_create_command_buffers();
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    mat4f_ortho(&projection2D, 0.0f, (float)scr_width, (float)scr_height, 0.0f, -1.0f, 1.0f);
+
+    vulkan_init();
+
+    vertices = vec_init(vertices, 1000);
+    world_vertices_cnt = 0;
 }
 
 bool window_should_close() {
     return glfwWindowShouldClose(window);
 }
 
-void gl_close() {
+// {{{ window_close() Helper
+
+void vulkan_destroy() {
     if (device) {
         vkDeviceWaitIdle(device);
     }
@@ -757,8 +864,13 @@ void gl_close() {
         frag_shader = NULL;
     }
 
-    gl_destroy_swapchain();
+    vulkan_destroy_swapchain();
     free(swapchain_imgs);
+
+    if (vertex_buffer) {
+        vmaDestroyBuffer(allocator, vertex_buffer, vertex_buffer_alloc);
+        vertex_buffer = NULL;
+    }
 
     if (allocator) {
         vmaDestroyAllocator(allocator);
@@ -780,40 +892,115 @@ void gl_close() {
     }
 
     volkFinalize();
+}
+
+// }}}
+
+void window_close() {
+    vulkan_destroy();
+
+    vec_destroy(vertices);
 
     glfwDestroyWindow(window);
     glfwTerminate();
 }
 
-void gl_run() {
+void clear_background(color_t color) {
+    bg_color_norm = NORM_COLOR(color);
+}
+
+// {{{ Vertex Buffer
+
+void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
+    if (vertex_buffer) {
+        vmaDestroyBuffer(allocator, vertex_buffer, vertex_buffer_alloc);
+    }
+
+    VkDeviceSize buffer_size = sizeof(vertex) * cnt;
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT
+    };
+
+    VmaAllocationInfo alloc_res_info;
+    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &vertex_buffer, &vertex_buffer_alloc, &alloc_res_info) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create vertex buffer!\n");
+        exit(-1);
+    }
+    memcpy(alloc_res_info.pMappedData, verts, buffer_size);
+    VkBufferDeviceAddressInfo addr_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = vertex_buffer
+    };
+    vertex_buffer_addr = vkGetBufferDeviceAddress(device, &addr_info);
+}
+
+// }}}
+
+void draw_rect(vec2f pos, vec2f size, color_t color) {
+    color_t norm_color = NORM_COLOR(color);
+
+    vertex rectangle[6] = {
+        {{pos.x + size.x, pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
+        {{pos.x + size.x, pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
+        {{pos.x,  pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
+    
+        {{pos.x + size.x, pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}},
+        {{pos.x,  pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
+        {{pos.x,  pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}
+    };
+
+    for (int i = 0; i < 6; i++) {
+        vec_push(vertices, rectangle[i]);
+    }
+    world_vertices_cnt += 6;
+}
+
+void begin_draw() {
+    // Update
+    calc_fps();
+
+    // Clear vertex buffer
+    vec_clear(vertices);
+    world_vertices_cnt = 0;
+
     // Update swapchain if resize
     if (req_swapchain_recreate) {
         vkDeviceWaitIdle(device);
-        gl_destroy_swapchain();
-        gl_create_swapchain(width, height);
+        vulkan_destroy_swapchain();
+        vulkan_create_swapchain(scr_width, scr_height);
         req_swapchain_recreate = false;
     }
 
     // Update and get frame
     uint32_t frame_res_idx = frame_counter++ % MAX_FRAME_IN_FLIGHT;
-    uint64_t frame_id = ++timeline_val; 
-    uint64_t wait_for_id = frame_id - MAX_FRAME_IN_FLIGHT;
+    cur_frame_id = ++timeline_val; 
+    uint64_t wait_for_id = cur_frame_id - MAX_FRAME_IN_FLIGHT;
 
-    if (frame_id > MAX_FRAME_IN_FLIGHT) {
+    if (cur_frame_id > MAX_FRAME_IN_FLIGHT) {
         VkSemaphoreWaitInfo wait_info = {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
             .semaphoreCount = 1,
             .pSemaphores = &timeline_sem,
             .pValues = &wait_for_id
         };
+
         vkWaitSemaphores(device, &wait_info, UINT64_MAX);
     }
 
-    frame_resources_t *res = &frame_resources[frame_res_idx];
-    vkResetCommandPool(device, res->pool, 0);
+    cur_res = &frame_resources[frame_res_idx];
+    vkResetCommandPool(device, cur_res->pool, 0);
 
-    uint32_t image_index = 0;
-    VkResult acquire_result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, res->img_aquired_sem, VK_NULL_HANDLE, &image_index);
+    cur_img_idx = 0;
+    VkResult acquire_result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, cur_res->img_aquired_sem, VK_NULL_HANDLE, &cur_img_idx);
 
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
         req_swapchain_recreate = true;
@@ -828,7 +1015,7 @@ void gl_run() {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
     };
-    vkBeginCommandBuffer(res->buffer, &cmd_begin_info);
+    vkBeginCommandBuffer(cur_res->buffer, &cmd_begin_info);
 
     // Image layout barriers
     VkImageMemoryBarrier2 layout_barriers[2] = {
@@ -840,7 +1027,7 @@ void gl_run() {
             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .image = swapchain_imgs[image_index],
+            .image = swapchain_imgs[cur_img_idx],
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .levelCount = 1,
@@ -869,18 +1056,18 @@ void gl_run() {
         .imageMemoryBarrierCount = 2,
         .pImageMemoryBarriers = layout_barriers
     };
-    vkCmdPipelineBarrier2(res->buffer, &dep_info);
+    vkCmdPipelineBarrier2(cur_res->buffer, &dep_info);
 
     // Dynamic rendering
     VkRenderingAttachmentInfo color_attach_info = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = swapchain_img_views[image_index],
+        .imageView = swapchain_img_views[cur_img_idx],
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue = { 
             .color = { 
-                { 0.0f, 0.0f, 0.0f, 1.0f } 
+                { bg_color_norm.r, bg_color_norm.g, bg_color_norm.b, bg_color_norm.a } 
             } 
         }
     };
@@ -917,7 +1104,10 @@ void gl_run() {
         .pDepthAttachment = &depth_attach_info
     };
 
-    vkCmdBeginRendering(res->buffer, &rendering_info);
+    vkCmdBeginRendering(cur_res->buffer, &rendering_info);
+}
+
+void end_draw() {
     {
         VkViewport viewport = {
             .x = 0, .y = 0,
@@ -925,7 +1115,7 @@ void gl_run() {
             .height = (float)swapchain_height,
             .minDepth = 0.0f, .maxDepth = 1.0f,
         };
-        vkCmdSetViewport(res->buffer, 0, 1, &viewport);
+        vkCmdSetViewport(cur_res->buffer, 0, 1, &viewport);
 
         VkRect2D scissor = {
             .offset = { 
@@ -936,13 +1126,22 @@ void gl_run() {
                 .width = swapchain_width, 
                 .height = swapchain_height }
         };
-        vkCmdSetScissor(res->buffer, 0, 1, &scissor);
+        vkCmdSetScissor(cur_res->buffer, 0, 1, &scissor);
 
-        vkCmdBindPipeline(res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        vkCmdDraw(res->buffer, 3, 1, 0, 0);
+        vulkan_create_vertex_buffer(vertices, world_vertices_cnt);
+
+        shader_push_consts_t shader_push_consts = {
+            .vertex_buffer_addr = vertex_buffer_addr,
+        };
+        memcpy(shader_push_consts.projection, projection2D.data, sizeof(float) * 16);
+
+        vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_consts_t), &shader_push_consts);
+
+        vkCmdDraw(cur_res->buffer, world_vertices_cnt, 1, 0, 0);
     }
-    vkCmdEndRendering(res->buffer);
+    vkCmdEndRendering(cur_res->buffer);
 
     // Make image ready to draw
     VkImageMemoryBarrier2 present_layout_barrier = {
@@ -953,7 +1152,7 @@ void gl_run() {
         .dstAccessMask = 0,
         .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        .image = swapchain_imgs[image_index],
+        .image = swapchain_imgs[cur_img_idx],
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
             .levelCount = 1,
@@ -965,34 +1164,34 @@ void gl_run() {
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &present_layout_barrier
     };
-    vkCmdPipelineBarrier2(res->buffer, &present_dep_info);
+    vkCmdPipelineBarrier2(cur_res->buffer, &present_dep_info);
 
-    vkEndCommandBuffer(res->buffer);
+    vkEndCommandBuffer(cur_res->buffer);
 
     // GFX queue submission
     VkSemaphoreSubmitInfo image_acquire_wait_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = res->img_aquired_sem,
+        .semaphore = cur_res->img_aquired_sem,
         .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
     };
 
     VkSemaphoreSubmitInfo semaphore_signals[2] = {
         {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .semaphore = render_complete_sems[image_index],
+            .semaphore = render_complete_sems[cur_img_idx],
             .stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT
         },
         {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
             .semaphore = timeline_sem,
-            .value = frame_id,
+            .value = cur_frame_id,
             .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
         }
     };
 
     VkCommandBufferSubmitInfo cmd_submit_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-        .commandBuffer = res->buffer,
+        .commandBuffer = cur_res->buffer,
     };
 
     VkSubmitInfo2 submit_info = {
@@ -1010,10 +1209,13 @@ void gl_run() {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &render_complete_sems[image_index],
+        .pWaitSemaphores = &render_complete_sems[cur_img_idx],
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
-        .pImageIndices = &image_index
+        .pImageIndices = &cur_img_idx
     };
     vkQueuePresentKHR(gfx_queue, &present_info);
+
+    // GLFW
+    glfwPollEvents();
 }
