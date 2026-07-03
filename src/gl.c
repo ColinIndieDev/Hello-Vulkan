@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <vulkan/vulkan_core.h>
+#include <stdarg.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -16,6 +16,8 @@
 #include <shaderc/shaderc.h>
 
 #include <cpstd/vector.h>
+#include <cpstd/mathplus.h>
+#include <cpstd/arena.h>
 
 #define VULKAN_VERSION VK_API_VERSION_1_4
 #define MAX_FRAME_IN_FLIGHT 2
@@ -30,17 +32,47 @@ mat4f projection2D;
 color_t bg_color_norm = RGB(0, 0, 0);
 
 vertex *vertices = NULL;
+object_instance *instances = NULL;
 uint32_t world_vertices_cnt = 0;
+uint32_t world_instances_cnt = 0;
 
 void enable_vsync(bool enabled) {
     vsync = enabled;
 }
 
+// {{{ Logging
+
+void log_msg(severity_t severtiy, const char *msg, ...) {
+    char buffer[KiB(1)];
+    va_list args;
+    va_start(args, msg);
+    vsnprintf(buffer, 1024, msg, args);
+    va_end(args);
+
+    time_t now = time(NULL);
+    struct tm *time = localtime(&now); 
+
+    switch (severtiy) {
+    case SEVERITY_INFO:
+        printf("[%02d:%02d:%02d INFO]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
+        break;
+    case SEVERITY_WARNING:
+        fprintf(stderr, "[%02d:%02d:%02d WARNING]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
+        break;
+    case SEVERITY_ERROR:
+        fprintf(stderr, "[%02d:%02d:%02d ERROR]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
+        break;
+    }
+}
+
+// }}}
+
 // {{{ Time
 
 unsigned int nb_frames = 0;
 float last_time = 0.0f;
-
+float last_frame = 0.0f;
+float dt = 0.0f;
 float target_frame_time = 0.0f;
 unsigned int fps = 0;
 
@@ -66,6 +98,60 @@ void calc_fps() {
 }
 unsigned int get_fps() { 
     return fps; 
+}
+void calc_dt() {
+    float cur_frame = get_time();
+    dt = cur_frame - last_frame;
+    last_frame = cur_frame;
+}
+float get_dt() { 
+    return dt; 
+}
+
+// }}}
+
+// {{{ Input
+
+bool key_states[KEY_LAST - KEY_SPACE + 1];
+bool prev_key_states[KEY_LAST - KEY_SPACE + 1];
+bool mouse_button_states[MOUSE_BUTTON_LAST + 1];
+bool prev_mouse_button_states[MOUSE_BUTTON_LAST + 1];
+
+void input_update() {
+    for (unsigned int i = 0; i < KEY_LAST - KEY_SPACE; i++) {
+        prev_key_states[i] = key_states[i];
+    }
+    for (unsigned int key = KEY_SPACE; key <= KEY_LAST; key++) {
+        key_states[key - KEY_SPACE] = glfwGetKey(window, (int)key) == GLFW_PRESS;
+    }
+
+    for (unsigned int i = 0; i < MOUSE_BUTTON_LAST - MOUSE_BUTTON_1; i++) {
+        prev_mouse_button_states[i] = mouse_button_states[i];
+    }
+    for (unsigned int button = MOUSE_BUTTON_1; button <= MOUSE_BUTTON_LAST; button++) {
+        mouse_button_states[button - MOUSE_BUTTON_1] = glfwGetMouseButton(window, (int)button) == GLFW_PRESS;
+    }
+}
+bool is_key_down(key_buttons key) { 
+    return key_states[(int)key - KEY_SPACE]; 
+}
+bool is_key_up(key_buttons key) { 
+    return !key_states[(int)key - KEY_SPACE]; 
+}
+bool is_key_pressed(key_buttons key) {
+    return key_states[(int)key - KEY_SPACE] && !prev_key_states[(int)key - KEY_SPACE];
+}
+bool is_key_released(key_buttons key) {
+    return !key_states[(int)key - KEY_SPACE] && prev_key_states[(int)key - KEY_SPACE];
+}
+bool is_mouse_down(mouse_buttons button) {
+    return mouse_button_states[(int)button - MOUSE_BUTTON_1];
+}
+bool is_mouse_pressed(mouse_buttons button) {
+    return mouse_button_states[(int)button - MOUSE_BUTTON_1] && !prev_mouse_button_states[(int)button - MOUSE_BUTTON_1];
+}
+bool is_mouse_released(mouse_buttons button) {
+    return !mouse_button_states[(int)button - MOUSE_BUTTON_1] && prev_mouse_button_states[(int)button - MOUSE_BUTTON_1];
 }
 
 // }}}
@@ -128,13 +214,19 @@ VkBuffer vertex_buffer = NULL;
 VmaAllocation vertex_buffer_alloc = NULL;
 uint64_t vertex_buffer_addr = 0;
 
+VkBuffer instances_buffer = NULL;
+VmaAllocation instances_buffer_alloc = NULL;
+uint64_t instances_buffer_addr = 0;
+
 // }}}
+
+// {{{ Window Init
 
 // {{{ vulkan_init() Helper
 
 void vulkan_create_instance() {
     if (volkInitialize() != VK_SUCCESS) {
-        fprintf(stderr, "Failed to init Volk!\n");
+        log_msg(SEVERITY_ERROR, "Failed to init Volk!\n");
         exit(-1);
     }
     VkApplicationInfo app_info = {
@@ -161,19 +253,23 @@ void vulkan_create_instance() {
     };
 
     if (vkCreateInstance(&create_info, NULL, &instance) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create Vulkan instance!\n");
+        log_msg(SEVERITY_ERROR, "Failed to create Vulkan instance!\n");
         exit(-1);
     }
 
     volkLoadInstance(instance);
+    log_msg(SEVERITY_INFO, "Created Vulkan instance!\n");
 }
 
 void vulkan_create_surface() {
     if (glfwCreateWindowSurface(instance, window, NULL, &surface) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create window surface!\n");
+        log_msg(SEVERITY_ERROR, "Failed to create window surface!\n");
         exit(-1);
     }
+    log_msg(SEVERITY_INFO, "Created window surface!\n");
 }
+
+// {{{ Device related
 
 void vulkan_find_physical_device() {
     uint32_t device_cnt = 0;
@@ -196,7 +292,7 @@ void vulkan_find_physical_device() {
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(physical_device, &props);
-    printf("Found GPU: %s!\n", props.deviceName);
+    log_msg(SEVERITY_INFO, "Found GPU: %s!\n", props.deviceName);
 
     uint32_t fmt_cnt = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &fmt_cnt, NULL);
@@ -204,7 +300,7 @@ void vulkan_find_physical_device() {
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &fmt_cnt, surface_fmts);
 
     if (fmt_cnt == 0) {
-        fprintf(stderr, "No surface formats are supported by GPU!\n");
+        log_msg(SEVERITY_ERROR, "No surface formats are supported by GPU!\n");
         exit(-1);
     }
 
@@ -228,7 +324,7 @@ void vulkan_find_physical_device() {
     }
 
     free(formats);
-    printf("Chosen this surface format: %d\n", swapchain_fmt);
+    log_msg(SEVERITY_INFO, "Chosen surface format %d!\n", swapchain_fmt);
 
     bool fmt_supported = false;
     for (int i = 0; i < fmt_cnt; i++) {
@@ -239,7 +335,7 @@ void vulkan_find_physical_device() {
     }
 
     if (!fmt_supported) {
-        fprintf(stderr, "Swapchain format is not supported by surface!\n");
+        log_msg(SEVERITY_ERROR, "Swapchain format is not supported by surface!\n");
         exit(-1);
     }
 }
@@ -262,7 +358,7 @@ void vulkan_find_graphics_queue() {
             return;
         }
     }
-    fprintf(stderr, "Could not find graphics queue!\n");
+    log_msg(SEVERITY_ERROR, "Could not find graphics queue!\n");
     exit(-1);
 }
 
@@ -300,7 +396,7 @@ void vulkan_create_device() {
 
     if (!supported_features13.dynamicRendering || !supported_features13.synchronization2 || 
         !supported_features12.timelineSemaphore || !supported_features12.scalarBlockLayout || !supported_features12.bufferDeviceAddress) {
-        fprintf(stderr, "Physical device does not meet feature requirements!\n");
+        log_msg(SEVERITY_ERROR, "Physical device does not meet feature requirements!\n");
         exit(-1);
     }
 
@@ -341,16 +437,18 @@ void vulkan_create_device() {
     };
 
     if (vkCreateDevice(physical_device, &dev_create_info, NULL, &device) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create device!\n");
+        log_msg(SEVERITY_ERROR, "Failed to create device!\n");
         exit(-1);
     }
 
     vkGetDeviceQueue(device, gfx_queue_fam_idx, 0, &gfx_queue);
     if (!gfx_queue) {
-        fprintf(stderr, "Cannot get graphics queue\n!");
+        log_msg(SEVERITY_ERROR, "Cannot get graphics queue\n!");
         exit(-1);
     }
 }
+
+// }}}
 
 void vulkan_init_vma() {
     VmaVulkanFunctions vma_func_info;
@@ -366,10 +464,13 @@ void vulkan_init_vma() {
 	vmaImportVulkanFunctionsFromVolk(&vma_alloc_info, &vma_func_info);
 
 	if (vmaCreateAllocator(&vma_alloc_info, &allocator) != VK_SUCCESS) {
-		fprintf(stderr, "Cannot create allocator!\n");
+		log_msg(SEVERITY_ERROR, "Cannot create allocator!\n");
         exit(-1);
-	} 
+	}
+    log_msg(SEVERITY_INFO, "Created VMA allocator!\n");
 }
+
+// {{{ Swapchain
 
 void vulkan_create_swapchain(uint32_t w, uint32_t h) {
     swapchain_width = w;
@@ -377,7 +478,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
 
 	VkSurfaceCapabilitiesKHR surface_caps;
 	if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_caps) != VK_SUCCESS) {
-		fprintf(stderr, "Cannot get surface capabilities!\n");
+		log_msg(SEVERITY_ERROR, "Cannot get surface capabilities!\n");
 		exit(-1);
 	}
 
@@ -399,7 +500,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
 	};
 
 	if (vkCreateSwapchainKHR(device, &swapchain_create_info, NULL, &swapchain) != VK_SUCCESS) {
-		fprintf(stderr, "Error creating swapchain!\n");
+		log_msg(SEVERITY_ERROR, "Error creating swapchain!\n");
 		exit(-1);
 	}
 
@@ -422,7 +523,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
 		};
 
 		if (vkCreateImageView(device, &img_view_info, NULL, &swapchain_img_views[i]) != VK_SUCCESS) {
-			fprintf(stderr, "Error creating swapchain image view!\n");
+			log_msg(SEVERITY_ERROR, "Error creating swapchain image view!\n");
 			exit(-1);
 		}
 	}
@@ -433,7 +534,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO 
         };
 		if (vkCreateSemaphore(device, &sem_info, NULL, &render_complete_sems[i]) != VK_SUCCESS) {
-			fprintf(stderr, "Error creating render-complete semaphore!\n");
+			log_msg(SEVERITY_ERROR, "Error creating render-complete semaphore!\n");
 			exit(-1);
 		}
 	}
@@ -460,7 +561,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
 		.usage = VMA_MEMORY_USAGE_AUTO
 	};
 	if (vmaCreateImage(allocator, &depth_create_info, &alloc_info, &depth_img, &depth_img_alloc, NULL) != VK_SUCCESS) {
-		fprintf(stderr, "Error allocating depth image!\n");
+		log_msg(SEVERITY_ERROR, "Error allocating depth image!\n");
 		exit(-1);
 	}
 
@@ -476,7 +577,7 @@ void vulkan_create_swapchain(uint32_t w, uint32_t h) {
         }
 	};
 	if (vkCreateImageView(device, &depth_img_view_info, NULL, &depth_img_view) != VK_SUCCESS) {
-		fprintf(stderr, "Error creating depth image view!\n");
+		log_msg(SEVERITY_ERROR, "Error creating depth image view!\n");
 		exit(-1);
 	}
 }
@@ -503,6 +604,10 @@ void vulkan_destroy_swapchain() {
 		depth_img_view = NULL;
 	}
 }
+
+// }}}
+
+// {{{ Shader
 
 char *vulkan_shader_read_file(char *path) {
     FILE *f = fopen(path, "rb");
@@ -539,11 +644,11 @@ VkShaderModule vulkan_create_shader_mod(char *path, char *name, shaderc_shader_k
     const char *src = vulkan_shader_read_file(final_path);
 
     if (!src) {
-        fprintf(stderr, "Cannot find shader src file: %s!\n", final_path);
+        log_msg(SEVERITY_ERROR, "Cannot find shader src file: %s!\n", final_path);
         return NULL;
     }
 
-    printf("Compiling shader: %s!\n", final_path);
+    log_msg(SEVERITY_INFO, "Compiling shader: %s!\n", final_path);
     free(final_path);
 
 	shaderc_compiler_t compiler = shaderc_compiler_initialize();;
@@ -555,7 +660,7 @@ VkShaderModule vulkan_create_shader_mod(char *path, char *name, shaderc_shader_k
     shaderc_compilation_result_t res = shaderc_compile_into_spv(compiler, src, strlen(src), kind, name, "main", opts);
 
 	if (shaderc_result_get_compilation_status(res) != shaderc_compilation_status_success) {
-		fprintf(stderr, "Shader Compilation Error: %s!\n", shaderc_result_get_error_message(res));
+		log_msg(SEVERITY_ERROR, "Shader Compilation Error: %s!\n", shaderc_result_get_error_message(res));
 		return NULL;
 	}
 
@@ -569,9 +674,10 @@ VkShaderModule vulkan_create_shader_mod(char *path, char *name, shaderc_shader_k
 	};
 	VkShaderModule shader_mod = NULL;
 	if (vkCreateShaderModule(device, &mod_create_info, NULL, &shader_mod) != VK_SUCCESS) {
-		fprintf(stderr, "Error creating shader module!\n");
+		log_msg(SEVERITY_ERROR, "Error creating shader module!\n");
 		return NULL;
 	}
+    log_msg(SEVERITY_INFO, "Finished compiling shader module!\n");
 	return shader_mod;
 }
 
@@ -580,10 +686,15 @@ void vulkan_create_shader(char *vert_path, char *vert_name, char *frag_path, cha
     frag_shader = vulkan_create_shader_mod(frag_path, frag_name, shaderc_fragment_shader);
 
     if (!vert_shader || !frag_shader) {
-        fprintf(stderr, "Error creating shader!\n");
+        log_msg(SEVERITY_ERROR, "Error creating shader!\n");
         exit(-1);
     }
+    log_msg(SEVERITY_INFO, "Created shader!\n");
 }
+
+// }}}
+
+// {{{ Pipeline
 
 void vulkan_create_gfx_pipeline() {
 	char *entry_point = "main";
@@ -613,7 +724,7 @@ void vulkan_create_gfx_pipeline() {
 
 	VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-		.depthTestEnable = VK_TRUE,
+		.depthTestEnable = VK_FALSE,
 		.depthWriteEnable = VK_TRUE,
 		.depthCompareOp = VK_COMPARE_OP_LESS,
 		.stencilTestEnable = VK_FALSE
@@ -680,7 +791,7 @@ void vulkan_create_gfx_pipeline() {
 		.pPushConstantRanges = &push_const_range
 	};
 	if (vkCreatePipelineLayout(device, &pipeline_layout_info, NULL, &pipeline_layout) != VK_SUCCESS) {
-		fprintf(stderr, "Unable to create pipeline layout!\n");
+		log_msg(SEVERITY_ERROR, "Unable to create pipeline layout!\n");
 		exit(-1);
 	}
 
@@ -701,9 +812,12 @@ void vulkan_create_gfx_pipeline() {
 		.renderPass = VK_NULL_HANDLE,
 	};
 	if (vkCreateGraphicsPipelines(device, NULL, 1, &pipeline_info, NULL, &pipeline) != VK_SUCCESS) {
-		fprintf(stderr, "Error creating pipeline!\n");
+		log_msg(SEVERITY_ERROR, "Error creating pipeline!\n");
 	}
+    log_msg(SEVERITY_INFO, "Created pipeline!\n");
 }
+
+// }}}
 
 void vulkan_create_sync_resources() {
     VkSemaphoreTypeCreateInfo sem_type_info = {
@@ -717,7 +831,7 @@ void vulkan_create_sync_resources() {
         	.pNext = &sem_type_info
         };
         if (vkCreateSemaphore(device, &sem_info, NULL, &timeline_sem) != VK_SUCCESS) {
-        	fprintf(stderr, "Unable to create timeline semaphore!\n");
+        	log_msg(SEVERITY_ERROR, "Unable to create timeline semaphore!\n");
         	exit(-1);
         }
     }
@@ -727,10 +841,11 @@ void vulkan_create_sync_resources() {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO 
         };
 		if (vkCreateSemaphore(device, &sem_info, NULL, &frame_resources[i].img_aquired_sem) != VK_SUCCESS) {
-			fprintf(stderr, "Error creating per-frame image-acquire semaphore!\n");
+			log_msg(SEVERITY_ERROR, "Error creating per-frame image-acquire semaphore!\n");
 			exit(-1);
 		}
 	}
+    log_msg(SEVERITY_INFO, "Created sync resources!\n");
 }
 
 void vulkan_create_command_buffers() {
@@ -739,7 +854,7 @@ void vulkan_create_command_buffers() {
 		.queueFamilyIndex = gfx_queue_fam_idx
 	};
 	if (vkCreateCommandPool(device, &poolInfo, NULL, &command_pool) != VK_SUCCESS) {
-		fprintf(stderr, "Unable to create command buffer pool!\n");
+		log_msg(SEVERITY_ERROR, "Unable to create command buffer pool!\n");
 		exit(-1);
     }
 
@@ -749,7 +864,7 @@ void vulkan_create_command_buffers() {
 			.queueFamilyIndex = gfx_queue_fam_idx
 		};
 		if (vkCreateCommandPool(device, &poolInfo, NULL, &frame_resources[i].pool) != VK_SUCCESS) {
-			fprintf(stderr, "Unable to create command buffer pool!\n");
+			log_msg(SEVERITY_ERROR, "Unable to create command buffer pool!\n");
 			exit(-1);
 		}
 
@@ -760,10 +875,11 @@ void vulkan_create_command_buffers() {
 			.commandBufferCount = 1,
 		};
 		if (vkAllocateCommandBuffers(device, &cmd_alloc_info, &frame_resources[i].buffer) != VK_SUCCESS) {
-			fprintf(stderr, "Unable to allocate command buffer!\n");
+			log_msg(SEVERITY_ERROR, "Unable to allocate command buffer!\n");
 			exit(-1);
 		}
 	}
+    log_msg(SEVERITY_INFO, "Created command buffers!\n");
 }
 
 // }}}
@@ -776,19 +892,23 @@ void vulkan_init() {
     vulkan_create_device();
     volkLoadDevice(device);
     vulkan_init_vma();
+
+    log_msg(SEVERITY_INFO, "VSync is set to %s!\n", vsync ? "true" : "false");
     vulkan_create_swapchain(scr_width, scr_height);
+    log_msg(SEVERITY_INFO, "Created swapchain!\n");
 
     vulkan_create_shader("shaders/", "shader.vert", "shaders/", "shader.frag");
 
     vulkan_create_gfx_pipeline();
     vulkan_create_sync_resources();
     vulkan_create_command_buffers();
+    log_msg(SEVERITY_INFO, "Initialized Vulkan!\n");
 }
 
 void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
     (void)window;
-    scr_width = (uint32_t)width;
-    scr_height = (uint32_t)height;
+    scr_width = width;
+    scr_height = height;
 
     req_swapchain_recreate = true;
 
@@ -802,21 +922,35 @@ void window_init(uint32_t width, uint32_t height, const char *title) {
     
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     window = glfwCreateWindow((int)scr_width, (int)scr_height, title, NULL, NULL);
-
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    log_msg(SEVERITY_INFO, "Initialized window!\n");
 
     mat4f_ortho(&projection2D, 0.0f, (float)scr_width, (float)scr_height, 0.0f, -1.0f, 1.0f);
 
     vulkan_init();
 
     vertices = vec_init(vertices, 1000);
-    world_vertices_cnt = 0;
+    instances = vec_init(instances, 100);
 }
 
+// }}}
+
 bool window_should_close() {
+    calc_fps();
+    calc_dt();
+    input_update();
     return glfwWindowShouldClose(window);
 }
+
+uint32_t get_screen_width() {
+    return scr_width;
+}   
+uint32_t get_screen_height() {
+    return scr_height;
+}   
 
 // {{{ window_close() Helper
 
@@ -871,6 +1005,10 @@ void vulkan_destroy() {
         vmaDestroyBuffer(allocator, vertex_buffer, vertex_buffer_alloc);
         vertex_buffer = NULL;
     }
+    if (instances_buffer) {
+        vmaDestroyBuffer(allocator, instances_buffer, instances_buffer_alloc);
+        vertex_buffer = NULL;
+    }
 
     if (allocator) {
         vmaDestroyAllocator(allocator);
@@ -892,6 +1030,7 @@ void vulkan_destroy() {
     }
 
     volkFinalize();
+    log_msg(SEVERITY_INFO, "Closing Vulkan!\n");
 }
 
 // }}}
@@ -900,16 +1039,18 @@ void window_close() {
     vulkan_destroy();
 
     vec_destroy(vertices);
+    vec_destroy(instances);
 
     glfwDestroyWindow(window);
     glfwTerminate();
+    log_msg(SEVERITY_INFO, "Closing window and terminating!\n");
 }
 
 void clear_background(color_t color) {
     bg_color_norm = NORM_COLOR(color);
 }
 
-// {{{ Vertex Buffer
+// {{{ Buffers
 
 void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
     if (vertex_buffer) {
@@ -932,7 +1073,7 @@ void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
 
     VmaAllocationInfo alloc_res_info;
     if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &vertex_buffer, &vertex_buffer_alloc, &alloc_res_info) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create vertex buffer!\n");
+        log_msg(SEVERITY_ERROR, "Failed to create vertex buffer!\n");
         exit(-1);
     }
     memcpy(alloc_res_info.pMappedData, verts, buffer_size);
@@ -943,34 +1084,121 @@ void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
     vertex_buffer_addr = vkGetBufferDeviceAddress(device, &addr_info);
 }
 
+void vulkan_create_object_instance_buffer(object_instance *insts, size_t cnt) {
+    if (insts) {
+        vmaDestroyBuffer(allocator, instances_buffer, instances_buffer_alloc);
+    }
+
+    VkDeviceSize buffer_size = sizeof(object_instance) * cnt;
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT
+    };
+
+    VmaAllocationInfo alloc_res_info;
+    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &instances_buffer, &instances_buffer_alloc, &alloc_res_info) != VK_SUCCESS) {
+        log_msg(SEVERITY_ERROR, "Failed to create vertex buffer!\n");
+        exit(-1);
+    }
+    memcpy(alloc_res_info.pMappedData, insts, buffer_size);
+    VkBufferDeviceAddressInfo addr_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = instances_buffer
+    };
+    instances_buffer_addr = vkGetBufferDeviceAddress(device, &addr_info);
+}
+
 // }}}
 
-void draw_rect(vec2f pos, vec2f size, color_t color) {
+void draw_rect(vec2f pos, vec2f size, color_t color, float rotation) {
     color_t norm_color = NORM_COLOR(color);
 
     vertex rectangle[6] = {
-        {{pos.x + size.x, pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
-        {{pos.x + size.x, pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
-        {{pos.x,  pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
+        VERTEX(size.x, 0.0f,   0.0f, world_instances_cnt), 
+        VERTEX(size.x, size.y, 0.0f, world_instances_cnt), 
+        VERTEX(0.0f,   0.0f,   0.0f, world_instances_cnt), 
     
-        {{pos.x + size.x, pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}},
-        {{pos.x,  pos.y + size.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}, 
-        {{pos.x,  pos.y, 0.0f}, {norm_color.r, norm_color.g, norm_color.b, norm_color.a}}
+        VERTEX(size.x, size.y, 0.0f, world_instances_cnt),
+        VERTEX(0.0f,   size.y, 0.0f, world_instances_cnt), 
+        VERTEX(0.0f,   0.0f,   0.0f, world_instances_cnt)
     };
+
+    mat4f transform;
+    mat4f_identity(&transform);
+    mat4f_translate(&transform, VEC3F(pos.x, pos.y, 0.0f));
+    mat4f_translate(&transform, VEC3F(size.x * 0.5f, size.y * 0.5f, 0.0f));
+    mat4f_rotate(&transform, math_rad(rotation), VEC3F(0.0f, 0.0f, 1.0f));
+    mat4f_translate(&transform, VEC3F(-size.x * 0.5f, -size.y * 0.5f, 0.0f));
 
     for (int i = 0; i < 6; i++) {
         vec_push(vertices, rectangle[i]);
     }
     world_vertices_cnt += 6;
+
+    object_instance obj = {
+        .color = norm_color
+    };
+    memcpy(obj.transform, transform, sizeof(mat4f));
+    vec_push(instances, obj);
+    world_instances_cnt++;
 }
+
+void draw_circle(vec2f pos, float radius, color_t color) {
+    color_t norm_color = NORM_COLOR(color);
+
+    float max_error = 0.25f; 
+    float segments_cnt = MATH_PI / acosf(1.0f - (max_error / radius));
+    uint32_t segments = (uint32_t)(ceilf(segments_cnt));
+    math_clamp(segments, 8, 128);
+    uint32_t vertices_cnt = segments * 3;
+    vertex circle[vertices_cnt];
+    int idx = 0;
+    float step = (float)(2 * MATH_PI) / (float)segments;
+
+    for (int i = 0; i < segments; i++) {
+        float alpha1 = (float)i * step;
+        float alpha2 = (float)(i + 1) * step;
+
+        circle[idx++] = VERTEX(0.0f, 0.0f, 0.0f, world_instances_cnt);
+        circle[idx++] = VERTEX(cosf(alpha1) * radius, sinf(alpha1) * radius, 0.0f, world_instances_cnt);
+        circle[idx++] = VERTEX(cosf(alpha2) * radius, sinf(alpha2) * radius, 0.0f, world_instances_cnt);
+    }
+
+    mat4f transform;
+    mat4f_identity(&transform);
+    mat4f_translate(&transform, VEC3F(pos.x, pos.y, 0.0f));
+
+    for (int i = 0; i < vertices_cnt; i++) {
+        vec_push(vertices, circle[i]);
+    }
+    world_vertices_cnt += vertices_cnt;
+
+    object_instance obj = {
+        .color = norm_color
+    };
+    memcpy(obj.transform, transform, sizeof(mat4f));
+    vec_push(instances, obj);
+    world_instances_cnt++;
+}
+
+// {{{ Begin draw
 
 void begin_draw() {
     // Update
-    calc_fps();
 
     // Clear vertex buffer
     vec_clear(vertices);
     world_vertices_cnt = 0;
+    vec_clear(instances);
+    world_instances_cnt = 0;
 
     // Update swapchain if resize
     if (req_swapchain_recreate) {
@@ -1107,6 +1335,10 @@ void begin_draw() {
     vkCmdBeginRendering(cur_res->buffer, &rendering_info);
 }
 
+// }}}
+
+// {{{ End draw
+
 void end_draw() {
     {
         VkViewport viewport = {
@@ -1130,16 +1362,22 @@ void end_draw() {
 
         vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        vulkan_create_vertex_buffer(vertices, world_vertices_cnt);
+        if (world_vertices_cnt > 0 && world_instances_cnt > 0) {
+            vulkan_create_vertex_buffer(vertices, world_vertices_cnt);
+            vulkan_create_object_instance_buffer(instances, world_instances_cnt);
+        }
 
         shader_push_consts_t shader_push_consts = {
             .vertex_buffer_addr = vertex_buffer_addr,
+            .instance_buffer_addr = instances_buffer_addr
         };
-        memcpy(shader_push_consts.projection, projection2D.data, sizeof(float) * 16);
+        memcpy(&shader_push_consts.projection, &projection2D, sizeof(mat4f));
 
         vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_consts_t), &shader_push_consts);
 
-        vkCmdDraw(cur_res->buffer, world_vertices_cnt, 1, 0, 0);
+        if (world_vertices_cnt > 0) {
+            vkCmdDraw(cur_res->buffer, world_vertices_cnt, 1, 0, 0);
+        }
     }
     vkCmdEndRendering(cur_res->buffer);
 
@@ -1219,3 +1457,5 @@ void end_draw() {
     // GLFW
     glfwPollEvents();
 }
+
+// }}}
