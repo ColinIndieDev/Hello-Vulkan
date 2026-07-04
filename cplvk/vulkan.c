@@ -1,10 +1,10 @@
-#include "gl.h"
+#include "vulkan.h"
 
-#include <stdint.h>
-#include <stdio.h>
+#include "logging.h"
+
+#include <cpstd/vector.h>
 #include <stdlib.h>
-#include <time.h>
-#include <stdarg.h>
+#include <stdio.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -14,149 +14,6 @@
 
 #include <vk_mem_alloc.h>
 #include <shaderc/shaderc.h>
-
-#include <cpstd/vector.h>
-#include <cpstd/mathplus.h>
-#include <cpstd/arena.h>
-
-#define VULKAN_VERSION VK_API_VERSION_1_4
-#define MAX_FRAME_IN_FLIGHT 2
-
-GLFWwindow *window = NULL;
-const char *title = "Hello World";
-uint32_t scr_width = 800, scr_height = 800;
-bool vsync = true;
-
-mat4f projection2D;
-
-color_t bg_color_norm = RGB(0, 0, 0);
-
-vertex *vertices = NULL;
-object_instance *instances = NULL;
-uint32_t world_vertices_cnt = 0;
-uint32_t world_instances_cnt = 0;
-
-void enable_vsync(bool enabled) {
-    vsync = enabled;
-}
-
-// {{{ Logging
-
-void log_msg(severity_t severtiy, const char *msg, ...) {
-    char buffer[KiB(1)];
-    va_list args;
-    va_start(args, msg);
-    vsnprintf(buffer, 1024, msg, args);
-    va_end(args);
-
-    time_t now = time(NULL);
-    struct tm *time = localtime(&now); 
-
-    switch (severtiy) {
-    case SEVERITY_INFO:
-        printf("[%02d:%02d:%02d INFO]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
-        break;
-    case SEVERITY_WARNING:
-        fprintf(stderr, "[%02d:%02d:%02d WARNING]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
-        break;
-    case SEVERITY_ERROR:
-        fprintf(stderr, "[%02d:%02d:%02d ERROR]: %s", time->tm_hour, time->tm_min, time->tm_sec, buffer);
-        break;
-    }
-}
-
-// }}}
-
-// {{{ Time
-
-unsigned int nb_frames = 0;
-float last_time = 0.0f;
-float last_frame = 0.0f;
-float dt = 0.0f;
-float target_frame_time = 0.0f;
-unsigned int fps = 0;
-
-float get_time() {
-    static struct timespec start_ts;
-    static bool initialized = false;
-    struct timespec cur_ts;
-    if (!initialized) {
-        clock_gettime(CLOCK_MONOTONIC, &start_ts);
-        initialized = true;
-    }
-    clock_gettime(CLOCK_MONOTONIC, &cur_ts);
-    return (float)((double)(cur_ts.tv_sec - start_ts.tv_sec) + ((double)(cur_ts.tv_nsec - start_ts.tv_nsec) * 1e-9));
-}
-void calc_fps() {
-    float cur_time = get_time();
-    nb_frames++;
-    if (cur_time - last_time >= 1.0) {
-        fps = nb_frames;
-        nb_frames = 0;
-        last_time += 1.0f;
-    }
-}
-unsigned int get_fps() { 
-    return fps; 
-}
-void calc_dt() {
-    float cur_frame = get_time();
-    dt = cur_frame - last_frame;
-    last_frame = cur_frame;
-}
-float get_dt() { 
-    return dt; 
-}
-
-// }}}
-
-// {{{ Input
-
-bool key_states[KEY_LAST - KEY_SPACE + 1];
-bool prev_key_states[KEY_LAST - KEY_SPACE + 1];
-bool mouse_button_states[MOUSE_BUTTON_LAST + 1];
-bool prev_mouse_button_states[MOUSE_BUTTON_LAST + 1];
-
-void input_update() {
-    for (unsigned int i = 0; i < KEY_LAST - KEY_SPACE; i++) {
-        prev_key_states[i] = key_states[i];
-    }
-    for (unsigned int key = KEY_SPACE; key <= KEY_LAST; key++) {
-        key_states[key - KEY_SPACE] = glfwGetKey(window, (int)key) == GLFW_PRESS;
-    }
-
-    for (unsigned int i = 0; i < MOUSE_BUTTON_LAST - MOUSE_BUTTON_1; i++) {
-        prev_mouse_button_states[i] = mouse_button_states[i];
-    }
-    for (unsigned int button = MOUSE_BUTTON_1; button <= MOUSE_BUTTON_LAST; button++) {
-        mouse_button_states[button - MOUSE_BUTTON_1] = glfwGetMouseButton(window, (int)button) == GLFW_PRESS;
-    }
-}
-bool is_key_down(key_buttons key) { 
-    return key_states[(int)key - KEY_SPACE]; 
-}
-bool is_key_up(key_buttons key) { 
-    return !key_states[(int)key - KEY_SPACE]; 
-}
-bool is_key_pressed(key_buttons key) {
-    return key_states[(int)key - KEY_SPACE] && !prev_key_states[(int)key - KEY_SPACE];
-}
-bool is_key_released(key_buttons key) {
-    return !key_states[(int)key - KEY_SPACE] && prev_key_states[(int)key - KEY_SPACE];
-}
-bool is_mouse_down(mouse_buttons button) {
-    return mouse_button_states[(int)button - MOUSE_BUTTON_1];
-}
-bool is_mouse_pressed(mouse_buttons button) {
-    return mouse_button_states[(int)button - MOUSE_BUTTON_1] && !prev_mouse_button_states[(int)button - MOUSE_BUTTON_1];
-}
-bool is_mouse_released(mouse_buttons button) {
-    return !mouse_button_states[(int)button - MOUSE_BUTTON_1] && prev_mouse_button_states[(int)button - MOUSE_BUTTON_1];
-}
-
-// }}}
-
-// {{{ Vulkan Variables
 
 VkInstance instance = NULL;
 VkSurfaceKHR surface = NULL;
@@ -175,7 +32,6 @@ VkQueue gfx_queue = NULL;
 VmaAllocator allocator = NULL;
 
 uint32_t img_cnt = 0;
-bool req_swapchain_recreate = false;
 VkSwapchainKHR swapchain = NULL;
 uint32_t swapchain_width = 0, swapchain_height = 0;
 VkImage *swapchain_imgs = NULL;
@@ -218,13 +74,9 @@ VkBuffer instances_buffer = NULL;
 VmaAllocation instances_buffer_alloc = NULL;
 uint64_t instances_buffer_addr = 0;
 
-// }}}
-
-// {{{ Window Init
-
 // {{{ vulkan_init() Helper
 
-void vulkan_create_instance() {
+void vulkan_create_instance(const char *title, uint32_t vk_version) {
     if (volkInitialize() != VK_SUCCESS) {
         log_msg(SEVERITY_ERROR, "Failed to init Volk!\n");
         exit(-1);
@@ -232,8 +84,8 @@ void vulkan_create_instance() {
     VkApplicationInfo app_info = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = title,
-        .applicationVersion = VULKAN_VERSION,
-        .apiVersion = VULKAN_VERSION
+        .applicationVersion = vk_version,
+        .apiVersion = vk_version
     };
 
     uint32_t count;
@@ -261,7 +113,7 @@ void vulkan_create_instance() {
     log_msg(SEVERITY_INFO, "Created Vulkan instance!\n");
 }
 
-void vulkan_create_surface() {
+void vulkan_create_surface(GLFWwindow *window) {
     if (glfwCreateWindowSurface(instance, window, NULL, &surface) != VK_SUCCESS) {
         log_msg(SEVERITY_ERROR, "Failed to create window surface!\n");
         exit(-1);
@@ -450,7 +302,7 @@ void vulkan_create_device() {
 
 // }}}
 
-void vulkan_init_vma() {
+void vulkan_init_vma(uint32_t vk_version) {
     VmaVulkanFunctions vma_func_info;
 	VmaAllocatorCreateInfo vma_alloc_info = {
 		.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
@@ -458,7 +310,7 @@ void vulkan_init_vma() {
 		.device = device,
 		.pVulkanFunctions = &vma_func_info,
 		.instance = instance,
-		.vulkanApiVersion = VULKAN_VERSION
+		.vulkanApiVersion = vk_version
 	};
 
 	vmaImportVulkanFunctionsFromVolk(&vma_alloc_info, &vma_func_info);
@@ -472,7 +324,7 @@ void vulkan_init_vma() {
 
 // {{{ Swapchain
 
-void vulkan_create_swapchain(uint32_t w, uint32_t h) {
+void vulkan_create_swapchain(uint32_t w, uint32_t h, bool vsync) {
     swapchain_width = w;
 	swapchain_height = h;
 
@@ -884,17 +736,17 @@ void vulkan_create_command_buffers() {
 
 // }}}
 
-void vulkan_init() {
-    vulkan_create_instance();
-    vulkan_create_surface();
+void vulkan_init(GLFWwindow *window, const char *title, uint32_t vk_version, uint32_t width, uint32_t height, bool vsync) {
+    vulkan_create_instance(title, vk_version);
+    vulkan_create_surface(window);
     vulkan_find_physical_device();
     vulkan_find_graphics_queue();
     vulkan_create_device();
     volkLoadDevice(device);
-    vulkan_init_vma();
+    vulkan_init_vma(vk_version);
 
     log_msg(SEVERITY_INFO, "VSync is set to %s!\n", vsync ? "true" : "false");
-    vulkan_create_swapchain(scr_width, scr_height);
+    vulkan_create_swapchain(width, height, vsync);
     log_msg(SEVERITY_INFO, "Created swapchain!\n");
 
     vulkan_create_shader("shaders/", "shader.vert", "shaders/", "shader.frag");
@@ -904,55 +756,6 @@ void vulkan_init() {
     vulkan_create_command_buffers();
     log_msg(SEVERITY_INFO, "Initialized Vulkan!\n");
 }
-
-void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
-    (void)window;
-    scr_width = width;
-    scr_height = height;
-
-    req_swapchain_recreate = true;
-
-    mat4f_ortho(&projection2D, 0.0f, (float)scr_width,(float)scr_height, 0.0f, -1.0f, 1.0f);
-}
-
-void window_init(uint32_t width, uint32_t height, const char *title) {
-    scr_width = width;
-    scr_height = height;
-    title = title;
-    
-    glfwInit();
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-    window = glfwCreateWindow((int)scr_width, (int)scr_height, title, NULL, NULL);
-    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
-
-    log_msg(SEVERITY_INFO, "Initialized window!\n");
-
-    mat4f_ortho(&projection2D, 0.0f, (float)scr_width, (float)scr_height, 0.0f, -1.0f, 1.0f);
-
-    vulkan_init();
-
-    vertices = vec_init(vertices, 1000);
-    instances = vec_init(instances, 100);
-}
-
-// }}}
-
-bool window_should_close() {
-    calc_fps();
-    calc_dt();
-    input_update();
-    return glfwWindowShouldClose(window);
-}
-
-uint32_t get_screen_width() {
-    return scr_width;
-}   
-uint32_t get_screen_height() {
-    return scr_height;
-}   
-
-// {{{ window_close() Helper
 
 void vulkan_destroy() {
     if (device) {
@@ -1033,23 +836,6 @@ void vulkan_destroy() {
     log_msg(SEVERITY_INFO, "Closing Vulkan!\n");
 }
 
-// }}}
-
-void window_close() {
-    vulkan_destroy();
-
-    vec_destroy(vertices);
-    vec_destroy(instances);
-
-    glfwDestroyWindow(window);
-    glfwTerminate();
-    log_msg(SEVERITY_INFO, "Closing window and terminating!\n");
-}
-
-void clear_background(color_t color) {
-    bg_color_norm = NORM_COLOR(color);
-}
-
 // {{{ Buffers
 
 void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
@@ -1118,94 +904,13 @@ void vulkan_create_object_instance_buffer(object_instance *insts, size_t cnt) {
 
 // }}}
 
-void draw_rect(vec2f pos, vec2f size, color_t color, float rotation) {
-    color_t norm_color = NORM_COLOR(color);
-
-    vertex rectangle[6] = {
-        VERTEX(size.x, 0.0f,   0.0f, world_instances_cnt), 
-        VERTEX(size.x, size.y, 0.0f, world_instances_cnt), 
-        VERTEX(0.0f,   0.0f,   0.0f, world_instances_cnt), 
-    
-        VERTEX(size.x, size.y, 0.0f, world_instances_cnt),
-        VERTEX(0.0f,   size.y, 0.0f, world_instances_cnt), 
-        VERTEX(0.0f,   0.0f,   0.0f, world_instances_cnt)
-    };
-
-    mat4f transform;
-    mat4f_identity(&transform);
-    mat4f_translate(&transform, VEC3F(pos.x, pos.y, 0.0f));
-    mat4f_translate(&transform, VEC3F(size.x * 0.5f, size.y * 0.5f, 0.0f));
-    mat4f_rotate(&transform, math_rad(rotation), VEC3F(0.0f, 0.0f, 1.0f));
-    mat4f_translate(&transform, VEC3F(-size.x * 0.5f, -size.y * 0.5f, 0.0f));
-
-    for (int i = 0; i < 6; i++) {
-        vec_push(vertices, rectangle[i]);
-    }
-    world_vertices_cnt += 6;
-
-    object_instance obj = {
-        .color = norm_color
-    };
-    memcpy(obj.transform, transform, sizeof(mat4f));
-    vec_push(instances, obj);
-    world_instances_cnt++;
-}
-
-void draw_circle(vec2f pos, float radius, color_t color) {
-    color_t norm_color = NORM_COLOR(color);
-
-    float max_error = 0.25f; 
-    float segments_cnt = MATH_PI / acosf(1.0f - (max_error / radius));
-    uint32_t segments = (uint32_t)(ceilf(segments_cnt));
-    math_clamp(segments, 8, 128);
-    uint32_t vertices_cnt = segments * 3;
-    vertex circle[vertices_cnt];
-    int idx = 0;
-    float step = (float)(2 * MATH_PI) / (float)segments;
-
-    for (int i = 0; i < segments; i++) {
-        float alpha1 = (float)i * step;
-        float alpha2 = (float)(i + 1) * step;
-
-        circle[idx++] = VERTEX(0.0f, 0.0f, 0.0f, world_instances_cnt);
-        circle[idx++] = VERTEX(cosf(alpha1) * radius, sinf(alpha1) * radius, 0.0f, world_instances_cnt);
-        circle[idx++] = VERTEX(cosf(alpha2) * radius, sinf(alpha2) * radius, 0.0f, world_instances_cnt);
-    }
-
-    mat4f transform;
-    mat4f_identity(&transform);
-    mat4f_translate(&transform, VEC3F(pos.x, pos.y, 0.0f));
-
-    for (int i = 0; i < vertices_cnt; i++) {
-        vec_push(vertices, circle[i]);
-    }
-    world_vertices_cnt += vertices_cnt;
-
-    object_instance obj = {
-        .color = norm_color
-    };
-    memcpy(obj.transform, transform, sizeof(mat4f));
-    vec_push(instances, obj);
-    world_instances_cnt++;
-}
-
-// {{{ Begin draw
-
-void begin_draw() {
-    // Update
-
-    // Clear vertex buffer
-    vec_clear(vertices);
-    world_vertices_cnt = 0;
-    vec_clear(instances);
-    world_instances_cnt = 0;
-
+void vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t width, uint32_t height, bool vsync) {
     // Update swapchain if resize
-    if (req_swapchain_recreate) {
+    if (*req_swapchain_recreate) {
         vkDeviceWaitIdle(device);
         vulkan_destroy_swapchain();
-        vulkan_create_swapchain(scr_width, scr_height);
-        req_swapchain_recreate = false;
+        vulkan_create_swapchain(width, height, vsync);
+        *req_swapchain_recreate = false;
     }
 
     // Update and get frame
@@ -1231,11 +936,11 @@ void begin_draw() {
     VkResult acquire_result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, cur_res->img_aquired_sem, VK_NULL_HANDLE, &cur_img_idx);
 
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
-        req_swapchain_recreate = true;
+        *req_swapchain_recreate = true;
         return;
     }
     if (acquire_result == VK_SUBOPTIMAL_KHR) {
-        req_swapchain_recreate = true;
+        *req_swapchain_recreate = true;
     }
 
     // Begin recording
@@ -1335,50 +1040,54 @@ void begin_draw() {
     vkCmdBeginRendering(cur_res->buffer, &rendering_info);
 }
 
-// }}}
+void vulkan_end(vertex *vertices, object_instance *instances, uint32_t *world_vertices_cnt, uint32_t *world_instances_cnt, mat4f *projection2D) {
+    VkViewport viewport = {
+        .x = 0, .y = 0,
+        .width = (float)swapchain_width,
+        .height = (float)swapchain_height,
+        .minDepth = 0.0f, 
+        .maxDepth = 1.0f
+    };
+    vkCmdSetViewport(cur_res->buffer, 0, 1, &viewport);
 
-// {{{ End draw
-
-void end_draw() {
-    {
-        VkViewport viewport = {
-            .x = 0, .y = 0,
-            .width = (float)swapchain_width,
-            .height = (float)swapchain_height,
-            .minDepth = 0.0f, .maxDepth = 1.0f,
-        };
-        vkCmdSetViewport(cur_res->buffer, 0, 1, &viewport);
-
-        VkRect2D scissor = {
-            .offset = { 
-                .x = 0, 
-                .y = 0 
-            },
-            .extent = { 
-                .width = swapchain_width, 
-                .height = swapchain_height }
-        };
-        vkCmdSetScissor(cur_res->buffer, 0, 1, &scissor);
-
-        vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-        if (world_vertices_cnt > 0 && world_instances_cnt > 0) {
-            vulkan_create_vertex_buffer(vertices, world_vertices_cnt);
-            vulkan_create_object_instance_buffer(instances, world_instances_cnt);
+    VkRect2D scissor = {
+        .offset = { 
+            .x = 0, 
+            .y = 0 
+        },
+        .extent = { 
+            .width = swapchain_width, 
+            .height = swapchain_height 
         }
+    };
+    vkCmdSetScissor(cur_res->buffer, 0, 1, &scissor);
 
-        shader_push_consts_t shader_push_consts = {
-            .vertex_buffer_addr = vertex_buffer_addr,
-            .instance_buffer_addr = instances_buffer_addr
-        };
-        memcpy(&shader_push_consts.projection, &projection2D, sizeof(mat4f));
+    vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_consts_t), &shader_push_consts);
-
-        if (world_vertices_cnt > 0) {
-            vkCmdDraw(cur_res->buffer, world_vertices_cnt, 1, 0, 0);
-        }
+    if (world_vertices_cnt > 0 && world_instances_cnt > 0) {
+        vulkan_create_vertex_buffer(vertices, *world_vertices_cnt);
+        vulkan_create_object_instance_buffer(instances, *world_instances_cnt);
     }
+
+    shader_push_consts_t shader_push_consts = {
+        .vertex_buffer_addr = vertex_buffer_addr,
+        .instance_buffer_addr = instances_buffer_addr
+    };
+    memcpy(&shader_push_consts.projection, projection2D, sizeof(mat4f));
+
+    vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_consts_t), &shader_push_consts);
+
+    if (world_vertices_cnt > 0) {
+        vkCmdDraw(cur_res->buffer, *world_vertices_cnt, 1, 0, 0);
+    }
+
+    vec_clear(vertices);
+    vec_clear(instances);
+    *world_vertices_cnt = 0;
+    *world_instances_cnt = 0;
+}
+
+void vulkan_end_frame() {
     vkCmdEndRendering(cur_res->buffer);
 
     // Make image ready to draw
@@ -1453,9 +1162,4 @@ void end_draw() {
         .pImageIndices = &cur_img_idx
     };
     vkQueuePresentKHR(gfx_queue, &present_info);
-
-    // GLFW
-    glfwPollEvents();
 }
-
-// }}}

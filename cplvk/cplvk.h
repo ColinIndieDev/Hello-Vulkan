@@ -10,10 +10,10 @@
 
 #include <cpstd/mathplus.h>
 
-typedef vec4f color_t;
+#include "vulkan.h"
+
 #define RGB(r, g, b) (color_t){r, g, b, 255.0f}
 #define RGBA(r, g, b, a) (color_t){r, g, b, a}
-#define NORM_COLOR(color) (color_t){(color).r / 255.0f, (color).g / 255.0f, (color).b / 255.0f, (color).a / 255.0f}
 
 #define WHITE RGB(255, 255, 255)
 #define BLACK RGB(0, 0, 0)
@@ -36,37 +36,18 @@ typedef vec4f color_t;
 #define ROTATION_Z(r) (vec3f){0.0f, 0.0f, r}
 
 typedef struct {
-    vec3f pos;
-    int instance_id;
-} vertex;
-#define VERTEX(x, y, z, id) (vertex){{x, y, z}, id}
+    vec2f pos;
+    float zoom;
+    float rot;
+} cam2D_t;
 
-typedef struct {
-    mat4f transform;
-    color_t color;
-} object_instance;
+typedef enum : uint32_t {
+    DRAW_MODE_NONE = 0,
+    DRAW_MODE_2D,
+    DRAW_MODE_UI
+} draw_mode;
 
-// shaders use std430 which expects 16 byte alignment
-typedef struct __attribute((aligned(16))) {
-    uint64_t vertex_buffer_addr;
-    uint64_t instance_buffer_addr;
-    mat4f projection;       
-} shader_push_consts_t;
-
-typedef struct {
-    VkCommandPool pool;
-    VkCommandBuffer buffer;
-    VkSemaphore img_aquired_sem;
-} frame_resources_t;
-
-typedef enum : uint8_t {
-    SEVERITY_INFO = 0,
-    SEVERITY_WARNING,
-    SEVERITY_ERROR
-} severity_t;
-
-void log_msg(severity_t severtiy, const char *msg, ...);
-
+cam2D_t *get_cam2D();
 void enable_vsync(bool enabled);
 unsigned int get_fps();
 float get_time();
@@ -225,12 +206,13 @@ bool is_mouse_released(mouse_buttons button);
 
 void draw_rect(vec2f pos, vec2f size, color_t color, float rotation);
 void draw_circle(vec2f pos, float radius, color_t color);
+void draw_triangle(vec2f pos, vec2f size, color_t color, float rotation);
 
 void window_init(uint32_t width, uint32_t height, const char *title);
 bool window_should_close();
 uint32_t get_screen_width();
 uint32_t get_screen_height();
 void clear_background(color_t color);
-void begin_draw();
+void begin_draw(draw_mode mode);
 void end_draw();
 void window_close();
