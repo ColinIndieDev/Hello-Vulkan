@@ -66,13 +66,13 @@ frame_resources_t *cur_res = NULL;
 uint32_t cur_img_idx = 0;
 uint64_t cur_frame_id = 0; 
 
-VkBuffer vertex_buffer = NULL;
-VmaAllocation vertex_buffer_alloc = NULL;
-uint64_t vertex_buffer_addr = 0;
+VkBuffer vertex_buffers[DRAW_MODES_SIZE] = {NULL};
+VmaAllocation vertex_buffer_allocs[DRAW_MODES_SIZE] = {NULL};
+uint64_t vertex_buffer_addrs[DRAW_MODES_SIZE] = {0};
 
-VkBuffer instances_buffer = NULL;
-VmaAllocation instances_buffer_alloc = NULL;
-uint64_t instances_buffer_addr = 0;
+VkBuffer instance_buffers[DRAW_MODES_SIZE] = {NULL};
+VmaAllocation instance_buffer_allocs[DRAW_MODES_SIZE] = {NULL};
+uint64_t instance_buffer_addrs[DRAW_MODES_SIZE] = {0};
 
 // {{{ vulkan_init() Helper
 
@@ -633,7 +633,7 @@ void vulkan_create_gfx_pipeline() {
     VkPushConstantRange push_const_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
-        .size = sizeof(shader_push_consts_t) + 8 // idk some shit padding
+        .size = sizeof(shader_push_constants_t)
     };
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info = {
@@ -804,13 +804,15 @@ void vulkan_destroy() {
     vulkan_destroy_swapchain();
     free(swapchain_imgs);
 
-    if (vertex_buffer) {
-        vmaDestroyBuffer(allocator, vertex_buffer, vertex_buffer_alloc);
-        vertex_buffer = NULL;
-    }
-    if (instances_buffer) {
-        vmaDestroyBuffer(allocator, instances_buffer, instances_buffer_alloc);
-        vertex_buffer = NULL;
+    for (int i = 0; i < DRAW_MODES_SIZE; i++) {
+        if (vertex_buffers[i]) {
+            vmaDestroyBuffer(allocator, vertex_buffers[i], vertex_buffer_allocs[i]);
+            vertex_buffers[i] = NULL;
+        }
+        if (instance_buffers[i]) {
+            vmaDestroyBuffer(allocator, instance_buffers[i], instance_buffer_allocs[i]);
+            instance_buffers[i] = NULL;
+        }
     }
 
     if (allocator) {
@@ -838,12 +840,12 @@ void vulkan_destroy() {
 
 // {{{ Buffers
 
-void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
-    if (vertex_buffer) {
-        vmaDestroyBuffer(allocator, vertex_buffer, vertex_buffer_alloc);
+void vulkan_create_vertex_buffer(vertex_t *vertices, size_t size, draw_mode_t mode) {
+    if (vertex_buffers[mode]) {
+        vmaDestroyBuffer(allocator, vertex_buffers[mode], vertex_buffer_allocs[mode]);
     }
 
-    VkDeviceSize buffer_size = sizeof(vertex) * cnt;
+    VkDeviceSize buffer_size = sizeof(vertex_t) * size;
 
     VkBufferCreateInfo buffer_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -858,24 +860,24 @@ void vulkan_create_vertex_buffer(vertex *verts, size_t cnt) {
     };
 
     VmaAllocationInfo alloc_res_info;
-    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &vertex_buffer, &vertex_buffer_alloc, &alloc_res_info) != VK_SUCCESS) {
+    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &vertex_buffers[mode], &vertex_buffer_allocs[mode], &alloc_res_info) != VK_SUCCESS) {
         log_msg(SEVERITY_ERROR, "Failed to create vertex buffer!\n");
         exit(-1);
     }
-    memcpy(alloc_res_info.pMappedData, verts, buffer_size);
+    memcpy(alloc_res_info.pMappedData, vertices, buffer_size);
     VkBufferDeviceAddressInfo addr_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = vertex_buffer
+        .buffer = vertex_buffers[mode]
     };
-    vertex_buffer_addr = vkGetBufferDeviceAddress(device, &addr_info);
+    vertex_buffer_addrs[mode] = vkGetBufferDeviceAddress(device, &addr_info);
 }
 
-void vulkan_create_object_instance_buffer(object_instance *insts, size_t cnt) {
-    if (insts) {
-        vmaDestroyBuffer(allocator, instances_buffer, instances_buffer_alloc);
+void vulkan_create_object_instance_buffer(instance_t *instances, size_t size, draw_mode_t mode) {
+    if (instance_buffers[mode]) {
+        vmaDestroyBuffer(allocator, instance_buffers[mode], instance_buffer_allocs[mode]);
     }
 
-    VkDeviceSize buffer_size = sizeof(object_instance) * cnt;
+    VkDeviceSize buffer_size = sizeof(instance_t) * size;
 
     VkBufferCreateInfo buffer_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -890,21 +892,21 @@ void vulkan_create_object_instance_buffer(object_instance *insts, size_t cnt) {
     };
 
     VmaAllocationInfo alloc_res_info;
-    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &instances_buffer, &instances_buffer_alloc, &alloc_res_info) != VK_SUCCESS) {
+    if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &instance_buffers[mode], &instance_buffer_allocs[mode], &alloc_res_info) != VK_SUCCESS) {
         log_msg(SEVERITY_ERROR, "Failed to create vertex buffer!\n");
         exit(-1);
     }
-    memcpy(alloc_res_info.pMappedData, insts, buffer_size);
+    memcpy(alloc_res_info.pMappedData, instances, buffer_size);
     VkBufferDeviceAddressInfo addr_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = instances_buffer
+        .buffer = instance_buffers[mode]
     };
-    instances_buffer_addr = vkGetBufferDeviceAddress(device, &addr_info);
+    instance_buffer_addrs[mode] = vkGetBufferDeviceAddress(device, &addr_info);
 }
 
 // }}}
 
-void vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t width, uint32_t height, bool vsync) {
+bool vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t width, uint32_t height, bool vsync) {
     // Update swapchain if resize
     if (*req_swapchain_recreate) {
         vkDeviceWaitIdle(device);
@@ -937,7 +939,7 @@ void vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t 
 
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
         *req_swapchain_recreate = true;
-        return;
+        return false;
     }
     if (acquire_result == VK_SUBOPTIMAL_KHR) {
         *req_swapchain_recreate = true;
@@ -1038,9 +1040,6 @@ void vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t 
     };
 
     vkCmdBeginRendering(cur_res->buffer, &rendering_info);
-}
-
-void vulkan_end(vertex *vertices, object_instance *instances, uint32_t *world_vertices_cnt, uint32_t *world_instances_cnt, mat4f *projection2D) {
     VkViewport viewport = {
         .x = 0, .y = 0,
         .width = (float)swapchain_width,
@@ -1064,27 +1063,26 @@ void vulkan_end(vertex *vertices, object_instance *instances, uint32_t *world_ve
 
     vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-    if (world_vertices_cnt > 0 && world_instances_cnt > 0) {
-        vulkan_create_vertex_buffer(vertices, *world_vertices_cnt);
-        vulkan_create_object_instance_buffer(instances, *world_instances_cnt);
+    return true;
+}
+
+void vulkan_end(vertex_t *vertices, instance_t *instances, uint32_t vertices_size, uint32_t instances_size, mat4f *projection2D, draw_mode_t mode) {
+    if (vertices_size == 0 || instances_size == 0) {
+        return;
     }
 
-    shader_push_consts_t shader_push_consts = {
-        .vertex_buffer_addr = vertex_buffer_addr,
-        .instance_buffer_addr = instances_buffer_addr
+    vulkan_create_vertex_buffer(vertices, vertices_size, mode);
+    vulkan_create_object_instance_buffer(instances, instances_size, mode);
+
+    shader_push_constants_t shader_push_consts = {
+        .vertex_buffer_addr = vertex_buffer_addrs[mode],
+        .instance_buffer_addr = instance_buffer_addrs[mode]
     };
     memcpy(&shader_push_consts.projection, projection2D, sizeof(mat4f));
 
-    vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_consts_t), &shader_push_consts);
+    vkCmdPushConstants(cur_res->buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(shader_push_constants_t), &shader_push_consts);
 
-    if (world_vertices_cnt > 0) {
-        vkCmdDraw(cur_res->buffer, *world_vertices_cnt, 1, 0, 0);
-    }
-
-    vec_clear(vertices);
-    vec_clear(instances);
-    *world_vertices_cnt = 0;
-    *world_instances_cnt = 0;
+    vkCmdDraw(cur_res->buffer, vertices_size, 1, 0, 0);
 }
 
 void vulkan_end_frame() {

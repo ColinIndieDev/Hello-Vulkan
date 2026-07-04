@@ -18,19 +18,19 @@ typedef vec4f color_t;
 typedef struct {
     vec3f pos;
     int instance_id;
-} vertex;
-#define VERTEX(x, y, z, id) (vertex){{x, y, z}, id}
+} vertex_t;
+#define VERTEX(x, y, z, id) (vertex_t){{x, y, z}, id}
 
 typedef struct {
     mat4f transform;
     color_t color;
-} object_instance;
+} instance_t;
 
 typedef struct __attribute((aligned(16))) {
     uint64_t vertex_buffer_addr;
     uint64_t instance_buffer_addr;
     mat4f projection;       
-} shader_push_consts_t;
+} shader_push_constants_t;
 
 typedef struct {
     VkCommandPool pool;
@@ -38,12 +38,19 @@ typedef struct {
     VkSemaphore img_aquired_sem;
 } frame_resources_t;
 
+typedef enum {
+    DRAW_MODE_NONE = -1,
+    DRAW_MODE_2D,
+    DRAW_MODE_UI,
+    DRAW_MODES_SIZE
+} draw_mode_t;
+
 void vulkan_init(GLFWwindow *window, const char *title, uint32_t vk_version, uint32_t width, uint32_t height, bool vsync);
 void vulkan_destroy();
 
-void vulkan_create_vertex_buffer(vertex *verts, size_t cnt);
-void vulkan_create_object_instance_buffer(object_instance *insts, size_t cnt);
+void vulkan_create_vertex_buffer(vertex_t *vertices, size_t size, draw_mode_t mode);
+void vulkan_create_object_instance_buffer(instance_t *instances, size_t size, draw_mode_t mode);
 
-void vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t width, uint32_t height, bool vsync);
-void vulkan_end(vertex *vertices, object_instance *instances, uint32_t *world_vertices_cnt, uint32_t *world_instances_cnt, mat4f *projection2D);
+bool vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t width, uint32_t height, bool vsync);
+void vulkan_end(vertex_t *vertices, instance_t *instances, uint32_t vertices_size, uint32_t instances_size, mat4f *projection2D, draw_mode_t mode);
 void vulkan_end_frame();

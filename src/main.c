@@ -39,18 +39,16 @@ int main(void) {
         if (is_key_down(KEY_LETTER_S)) {
             get_cam2D()->pos.y += speed * get_dt();
         }
-
         ball_update();
 
         begin_draw(DRAW_MODE_2D);
         draw_rect(VEC2F(0, 0), VEC2F(100, 100), DARK_GRAY, 0);
         draw_rect(pos, VEC2F(50, 50), PURPLE, get_time() * 360);
         draw_triangle(VEC2F(400, 400), VEC2F(80, 80), RED, 45);
-        
-        // TODO fix this
-        // begin_draw(DRAW_MODE_UI);
-        draw_circle(ball_pos, radius, YELLOW);
 
+        begin_draw(DRAW_MODE_UI);
+        draw_circle(ball_pos, radius, YELLOW);
+        
         end_draw();
     }
     window_close();

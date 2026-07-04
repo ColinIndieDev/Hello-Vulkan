@@ -41,12 +41,6 @@ typedef struct {
     float rot;
 } cam2D_t;
 
-typedef enum : uint32_t {
-    DRAW_MODE_NONE = 0,
-    DRAW_MODE_2D,
-    DRAW_MODE_UI
-} draw_mode;
-
 cam2D_t *get_cam2D();
 void enable_vsync(bool enabled);
 unsigned int get_fps();
@@ -213,6 +207,6 @@ bool window_should_close();
 uint32_t get_screen_width();
 uint32_t get_screen_height();
 void clear_background(color_t color);
-void begin_draw(draw_mode mode);
+void begin_draw(draw_mode_t mode);
 void end_draw();
 void window_close();

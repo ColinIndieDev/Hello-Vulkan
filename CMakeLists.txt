@@ -97,7 +97,7 @@ FetchContent_MakeAvailable(volk vma)
 # Is used here but normally never do 
 # it name the files manually
 
-file(GLOB_RECURSE SOURCE_FILES CONFIGURE DEPENDS src/*.c src/*.cpp cplvk/*.c)
+file(GLOB_RECURSE SOURCE_FILES CONFIGURE DEPENDS src/*.c cplvk/*.cpp cplvk/*.c)
 message(STATUS "============================================")
 message(STATUS "Included files")
 message(STATUS "============================================")

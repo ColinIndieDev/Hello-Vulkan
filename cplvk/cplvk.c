@@ -29,13 +29,13 @@ cam2D_t cam2D = {
     .rot = 0.0f
 };
 bool is_mode2D;
-draw_mode cur_draw_mode = DRAW_MODE_NONE;
+draw_mode_t cur_draw_mode = DRAW_MODE_NONE;
 mat4f projection2D;
 
 color_t bg_color_norm = RGB(0, 0, 0);
 
-vertex *vertices = NULL;
-object_instance *instances = NULL;
+vertex_t *vertices = NULL;
+instance_t *instances = NULL;
 uint32_t world_vertices_cnt = 0;
 uint32_t world_instances_cnt = 0;
 
@@ -222,7 +222,7 @@ void clear_background(color_t color) {
 void draw_rect(vec2f pos, vec2f size, color_t color, float rotation) {
     color_t norm_color = NORM_COLOR(color);
 
-    vertex rectangle[6] = {
+    vertex_t rectangle[6] = {
         VERTEX(size.x, 0.0f,   0.0f, world_instances_cnt), 
         VERTEX(size.x, size.y, 0.0f, world_instances_cnt), 
         VERTEX(0.0f,   0.0f,   0.0f, world_instances_cnt), 
@@ -244,18 +244,18 @@ void draw_rect(vec2f pos, vec2f size, color_t color, float rotation) {
     }
     world_vertices_cnt += 6;
 
-    object_instance obj = {
+    instance_t inst = {
         .color = norm_color
     };
-    memcpy(obj.transform, transform, sizeof(mat4f));
-    vec_push(instances, obj);
+    memcpy(inst.transform, transform, sizeof(mat4f));
+    vec_push(instances, inst);
     world_instances_cnt++;
 }
 
 void draw_triangle(vec2f pos, vec2f size, color_t color, float rotation) {
     color_t norm_color = NORM_COLOR(color);
 
-    vertex triangle[3] = {
+    vertex_t triangle[3] = {
         VERTEX(0.0f,            0.0f,   0.0f, world_instances_cnt), 
         VERTEX(size.x,          0.0f,   0.0f, world_instances_cnt), 
         VERTEX(size.x * 0.5f,   size.y, 0.0f, world_instances_cnt), 
@@ -273,11 +273,11 @@ void draw_triangle(vec2f pos, vec2f size, color_t color, float rotation) {
     }
     world_vertices_cnt += 3;
 
-    object_instance obj = {
+    instance_t inst = {
         .color = norm_color
     };
-    memcpy(obj.transform, transform, sizeof(mat4f));
-    vec_push(instances, obj);
+    memcpy(inst.transform, transform, sizeof(mat4f));
+    vec_push(instances, inst);
     world_instances_cnt++;
 }
 
@@ -289,7 +289,7 @@ void draw_circle(vec2f pos, float radius, color_t color) {
     uint32_t segments = (uint32_t)(ceilf(segments_cnt));
     math_clamp(segments, 8, 128);
     uint32_t vertices_cnt = segments * 3;
-    vertex circle[vertices_cnt];
+    vertex_t circle[vertices_cnt];
     int idx = 0;
     float step = (float)(2 * MATH_PI) / (float)segments;
 
@@ -311,21 +311,17 @@ void draw_circle(vec2f pos, float radius, color_t color) {
     }
     world_vertices_cnt += vertices_cnt;
 
-    object_instance obj = {
+    instance_t inst = {
         .color = norm_color
     };
-    memcpy(obj.transform, transform, sizeof(mat4f));
-    vec_push(instances, obj);
+    memcpy(inst.transform, transform, sizeof(mat4f));
+    vec_push(instances, inst);
     world_instances_cnt++;
 }
 
 // }}}
 
-void begin_draw(draw_mode mode) {
-    if (cur_draw_mode == mode) {
-        return;
-    }
-
+void begin_draw(draw_mode_t mode) {
     if (mode == DRAW_MODE_NONE) {
         log_msg(SEVERITY_ERROR, "Cannot change draw mode to DRAW_MODE_NONE!\n");
         exit(-1);
@@ -333,30 +329,50 @@ void begin_draw(draw_mode mode) {
     
     if (cur_draw_mode == DRAW_MODE_NONE) {
         vulkan_begin(&req_swapchain_recreate, bg_color_norm, scr_width, scr_height, vsync);
-    } else {
-        mat4f view_projection2D;
+        cur_draw_mode = mode;
+        return;
+    }
+
+    if (cur_draw_mode != mode) {
+        mat4f view_projection;
         if (cur_draw_mode == DRAW_MODE_2D) {
             mat4f *view = cam_2D_get_view_mat(&cam2D);
-            mat4f_mul(&projection2D, view, &view_projection2D);
+            mat4f_mul(&projection2D, view, &view_projection);
             free(view);
+        } else {
+            memcpy(&view_projection, &projection2D, sizeof(mat4f));
         }
-        vulkan_end(vertices, instances, &world_vertices_cnt, &world_instances_cnt, 
-                   (cur_draw_mode == DRAW_MODE_2D) ? &view_projection2D : &projection2D);
+        vulkan_end(vertices, instances, world_vertices_cnt, world_instances_cnt, &view_projection, cur_draw_mode);
+        vec_clear(vertices);
+        vec_clear(instances);
+        world_vertices_cnt = 0;
+        world_instances_cnt = 0;
+        cur_draw_mode = mode;
     }
-    cur_draw_mode = mode;
 }
 
 void end_draw() {
-    mat4f view_projection2D;
+    if (cur_draw_mode == DRAW_MODE_NONE) {
+        glfwPollEvents();
+        return;
+    }
+
+    mat4f view_projection;
     if (cur_draw_mode == DRAW_MODE_2D) {
         mat4f *view = cam_2D_get_view_mat(&cam2D);
-        mat4f_mul(&projection2D, view, &view_projection2D);
+        mat4f_mul(&projection2D, view, &view_projection);
         free(view);
+    } else {
+        memcpy(&view_projection, &projection2D, sizeof(mat4f));
     }
-    vulkan_end(vertices, instances, &world_vertices_cnt, &world_instances_cnt, 
-               (cur_draw_mode == DRAW_MODE_2D) ? &view_projection2D : &projection2D);
+    vulkan_end(vertices, instances, world_vertices_cnt, world_instances_cnt, &view_projection, cur_draw_mode);
     vulkan_end_frame();
-    
+
+    vec_clear(vertices);
+    vec_clear(instances);
+    world_vertices_cnt = 0;
+    world_instances_cnt = 0;
     cur_draw_mode = DRAW_MODE_NONE;
+
     glfwPollEvents();
 }
