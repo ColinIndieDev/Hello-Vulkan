@@ -32,6 +32,8 @@ bool is_mode2D;
 draw_mode_t cur_draw_mode = DRAW_MODE_NONE;
 mat4f projection2D;
 
+shader_t shape2D_shader;
+
 color_t bg_color_norm = RGB(0, 0, 0);
 
 vertex_t *vertices = NULL;
@@ -182,6 +184,8 @@ void window_init(uint32_t width, uint32_t height, const char *title) {
 
     vulkan_init(window, title, VULKAN_VERSION, scr_width, scr_height, vsync);
 
+    vulkan_load_shader(&shape2D_shader, "shaders/shader.vert", "shaders/shader.frag");
+
     vertices = vec_init(vertices, 1000);
     instances = vec_init(instances, 100);
 }
@@ -203,6 +207,8 @@ uint32_t get_screen_height() {
 }   
 
 void window_close() {
+    vulkan_destroy_shader(&shape2D_shader);
+    
     vulkan_destroy();
 
     vec_destroy(vertices);
@@ -330,6 +336,10 @@ void begin_draw(draw_mode_t mode) {
     if (cur_draw_mode == DRAW_MODE_NONE) {
         vulkan_begin(&req_swapchain_recreate, bg_color_norm, scr_width, scr_height, vsync);
         cur_draw_mode = mode;
+
+        // Since there are not any more shaders we bind always the same
+        vulkan_shader_bind(&shape2D_shader);
+
         return;
     }
 

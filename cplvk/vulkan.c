@@ -5,6 +5,7 @@
 #include <cpstd/vector.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <vulkan/vulkan_core.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -42,11 +43,7 @@ VkImage depth_img = NULL;
 VkImageView depth_img_view = NULL;
 VmaAllocation depth_img_alloc = NULL;
 
-VkShaderModule vert_shader = NULL;
-VkShaderModule frag_shader = NULL;
-
 VkPipelineLayout pipeline_layout = NULL;
-VkPipeline pipeline = NULL;
 
 VkSemaphore timeline_sem = NULL;
 uint64_t timeline_val = 0;
@@ -88,8 +85,16 @@ void vulkan_create_instance(const char *title, uint32_t vk_version) {
         .apiVersion = vk_version
     };
 
-    uint32_t count;
-    const char **extensions = glfwGetRequiredInstanceExtensions(&count);
+    uint32_t glfw_cnt = 0;
+    const char **glfw_extensions = glfwGetRequiredInstanceExtensions(&glfw_cnt);
+
+    uint32_t cnt = glfw_cnt + 1;
+    const char **extensions = malloc(sizeof(char*) * cnt);
+    for (uint32_t i = 0; i < glfw_cnt; i++) {
+        extensions[i] = glfw_extensions[i];
+    }
+    // VK_EXT_shader_object
+    extensions[glfw_cnt] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
 
     const char *requested_layers[1] = {
         "VK_LAYER_KHRONOS_validation"
@@ -100,15 +105,17 @@ void vulkan_create_instance(const char *title, uint32_t vk_version) {
         .pApplicationInfo = &app_info,
         .enabledLayerCount = 1,
         .ppEnabledLayerNames = requested_layers,
-        .enabledExtensionCount = count,
+        .enabledExtensionCount = cnt,
         .ppEnabledExtensionNames = extensions
     };
 
     if (vkCreateInstance(&create_info, NULL, &instance) != VK_SUCCESS) {
         log_msg(SEVERITY_ERROR, "Failed to create Vulkan instance!\n");
+        free(extensions);
         exit(-1);
     }
 
+    free(extensions);
     volkLoadInstance(instance);
     log_msg(SEVERITY_INFO, "Created Vulkan instance!\n");
 }
@@ -227,9 +234,14 @@ void vulkan_create_device() {
         .pQueuePriorities = &priority
     };
 
+    VkPhysicalDeviceShaderObjectFeaturesEXT supported_shader_object_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .pNext = NULL
+    };
+
     VkPhysicalDeviceVulkan14Features supported_features14 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-        .pNext = NULL
+        .pNext = &supported_shader_object_features
     };
     VkPhysicalDeviceVulkan13Features supported_features13 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -247,14 +259,21 @@ void vulkan_create_device() {
     vkGetPhysicalDeviceFeatures2(physical_device, &supported_features);
 
     if (!supported_features13.dynamicRendering || !supported_features13.synchronization2 || 
-        !supported_features12.timelineSemaphore || !supported_features12.scalarBlockLayout || !supported_features12.bufferDeviceAddress) {
+        !supported_features12.timelineSemaphore || !supported_features12.scalarBlockLayout || 
+        !supported_features12.bufferDeviceAddress || !supported_shader_object_features.shaderObject) {
         log_msg(SEVERITY_ERROR, "Physical device does not meet feature requirements!\n");
         exit(-1);
     }
 
+    VkPhysicalDeviceShaderObjectFeaturesEXT shader_object_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .pNext = NULL,
+        .shaderObject = VK_TRUE
+    };
+
     VkPhysicalDeviceVulkan14Features features14 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-        .pNext = NULL
+        .pNext = &shader_object_features
     };
     VkPhysicalDeviceVulkan13Features features13 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -275,15 +294,16 @@ void vulkan_create_device() {
         .pNext = &features12
     };
 
-    const char *device_extensions[1] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    const char *device_extensions[2] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME
     };
     VkDeviceCreateInfo dev_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = &features,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &gfx_queue_info,
-        .enabledExtensionCount = 1,
+        .enabledExtensionCount = 2,
         .ppEnabledExtensionNames = device_extensions,
         .pEnabledFeatures = NULL
     };
@@ -292,6 +312,8 @@ void vulkan_create_device() {
         log_msg(SEVERITY_ERROR, "Failed to create device!\n");
         exit(-1);
     }
+
+    volkLoadDevice(device);
 
     vkGetDeviceQueue(device, gfx_queue_fam_idx, 0, &gfx_queue);
     if (!gfx_queue) {
@@ -489,187 +511,105 @@ char *vulkan_shader_read_file(char *path) {
     return buffer;
 }
 
-VkShaderModule vulkan_create_shader_mod(char *path, char *name, shaderc_shader_kind kind) {
-    char *final_path = malloc(strlen(path) + strlen(name) + 1);
-    strcpy(final_path, path);
-    strcat(final_path, name);
-    const char *src = vulkan_shader_read_file(final_path);
-
+void vulkan_load_shader_module(shader_module_t *mod, char *path, VkShaderStageFlagBits stage, shaderc_shader_kind kind, VkPushConstantRange *push_const_range) {
+    const char *src = vulkan_shader_read_file(path);
     if (!src) {
-        log_msg(SEVERITY_ERROR, "Cannot find shader src file: %s!\n", final_path);
-        return NULL;
+        log_msg(SEVERITY_ERROR, "Cannot find shader src file: %s!\n", path);
+        return;
     }
 
-    log_msg(SEVERITY_INFO, "Compiling shader: %s!\n", final_path);
-    free(final_path);
-
-	shaderc_compiler_t compiler = shaderc_compiler_initialize();;
+    log_msg(SEVERITY_INFO, "Compiling shader: %s!\n", path);
+	shaderc_compiler_t compiler = shaderc_compiler_initialize();
 	shaderc_compile_options_t opts = shaderc_compile_options_initialize();
     shaderc_compile_options_set_target_env(opts, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4);
     shaderc_compile_options_set_target_spirv(opts, shaderc_spirv_version_1_6);
     shaderc_compile_options_set_optimization_level(opts, shaderc_optimization_level_performance);
 
-    shaderc_compilation_result_t res = shaderc_compile_into_spv(compiler, src, strlen(src), kind, name, "main", opts);
+    shaderc_compilation_result_t res = shaderc_compile_into_spv(compiler, src, strlen(src), kind, path, "main", opts);
 
 	if (shaderc_result_get_compilation_status(res) != shaderc_compilation_status_success) {
 		log_msg(SEVERITY_ERROR, "Shader Compilation Error: %s!\n", shaderc_result_get_error_message(res));
-		return NULL;
+		return;
 	}
 
     size_t byte_len = shaderc_result_get_length(res);
     const uint32_t *spv = (const uint32_t *)shaderc_result_get_bytes(res);
 
-	VkShaderModuleCreateInfo mod_create_info = {
-		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = byte_len,
-		.pCode = spv
-	};
-	VkShaderModule shader_mod = NULL;
-	if (vkCreateShaderModule(device, &mod_create_info, NULL, &shader_mod) != VK_SUCCESS) {
+	VkShaderCreateInfoEXT create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+        .stage = stage,
+        .nextStage = (stage == VK_SHADER_STAGE_VERTEX_BIT) ? VK_SHADER_STAGE_FRAGMENT_BIT : 0,
+        .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+        .codeSize = byte_len,
+        .pCode = spv,
+        .pName = "main",
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = push_const_range
+    };
+
+	if (vkCreateShadersEXT(device, 1, &create_info, NULL, &mod->shader) != VK_SUCCESS) {
 		log_msg(SEVERITY_ERROR, "Error creating shader module!\n");
-		return NULL;
+		return;
 	}
     log_msg(SEVERITY_INFO, "Finished compiling shader module!\n");
-	return shader_mod;
+
+    shaderc_result_release(res);
+    shaderc_compile_options_release(opts);
+    shaderc_compiler_release(compiler);
+    free((void*)src);
 }
 
-void vulkan_create_shader(char *vert_path, char *vert_name, char *frag_path, char *frag_name) {
-    vert_shader = vulkan_create_shader_mod(vert_path, vert_name, shaderc_vertex_shader);
-    frag_shader = vulkan_create_shader_mod(frag_path, frag_name, shaderc_fragment_shader);
+void vulkan_load_shader(shader_t *shader, char *vert_path, char *frag_path) {
+    shader->push_const_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    shader->push_const_range.offset = 0;
+    shader->push_const_range.size = sizeof(shader_push_constants_t);
 
-    if (!vert_shader || !frag_shader) {
-        log_msg(SEVERITY_ERROR, "Error creating shader!\n");
-        exit(-1);
+    vulkan_load_shader_module(&shader->vert, vert_path, VK_SHADER_STAGE_VERTEX_BIT, shaderc_vertex_shader, &shader->push_const_range);
+    vulkan_load_shader_module(&shader->frag, frag_path, VK_SHADER_STAGE_FRAGMENT_BIT, shaderc_fragment_shader, &shader->push_const_range);
+}
+
+void vulkan_destroy_shader(shader_t *shader) {
+    if (shader) {
+        vkDestroyShaderEXT(device, shader->vert.shader, NULL);
+        vkDestroyShaderEXT(device, shader->frag.shader, NULL);
+        shader->vert.shader = NULL;
+        shader->frag.shader = NULL;
     }
-    log_msg(SEVERITY_INFO, "Created shader!\n");
+}
+
+void vulkan_shader_bind(shader_t *shader) {
+    VkShaderStageFlagBits stages[2] = { 
+        VK_SHADER_STAGE_VERTEX_BIT, 
+        VK_SHADER_STAGE_FRAGMENT_BIT 
+    };
+    VkShaderEXT shaders[2] = { 
+        shader->vert.shader, 
+        shader->frag.shader
+    };
+
+    vkCmdBindShadersEXT(cur_res->buffer, 2, stages, shaders);
 }
 
 // }}}
 
-// {{{ Pipeline
-
-void vulkan_create_gfx_pipeline() {
-	char *entry_point = "main";
-	VkPipelineShaderStageCreateInfo shader_stages[2] = {
-		{
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.stage = VK_SHADER_STAGE_VERTEX_BIT,
-			.module = vert_shader,
-			.pName = entry_point
-		},
-		{
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-			.module = frag_shader,
-			.pName = entry_point
-		}
-	};
-
-	VkPipelineVertexInputStateCreateInfo vert_in_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
-	};
-
-	VkPipelineInputAssemblyStateCreateInfo in_assembly_info =  {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-	};
-
-	VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-		.depthTestEnable = VK_FALSE,
-		.depthWriteEnable = VK_TRUE,
-		.depthCompareOp = VK_COMPARE_OP_LESS,
-		.stencilTestEnable = VK_FALSE
-	};
-
-	VkPipelineViewportStateCreateInfo viewport_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-		.viewportCount = 1,
-		.pViewports = NULL,
-		.scissorCount = 1,
-		.pScissors = NULL
-	};
-
-	VkPipelineRasterizationStateCreateInfo raster_info =  {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-		.polygonMode = VK_POLYGON_MODE_FILL,
-		.cullMode = VK_CULL_MODE_NONE,
-		.frontFace = VK_FRONT_FACE_CLOCKWISE,
-		.lineWidth = 1.0f
-	};
-
-	VkPipelineMultisampleStateCreateInfo multisample_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
-	};
-
-	VkPipelineColorBlendAttachmentState attach_state = {
-		.blendEnable = VK_FALSE,
-		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
-	};
-	VkPipelineColorBlendStateCreateInfo blend_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		.attachmentCount = 1,
-		.pAttachments = &attach_state
-	};
-
-	VkDynamicState dynamic_state[2] = {
-		VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR
-	};
-	VkPipelineDynamicStateCreateInfo dynamic_state_info =  {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		.dynamicStateCount = 2,
-		.pDynamicStates = dynamic_state
-	};
-
-	VkPipelineRenderingCreateInfo render_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-		.colorAttachmentCount = 1,
-		.pColorAttachmentFormats = &swapchain_fmt,
-		.depthAttachmentFormat = depth_fmt,
-	};
-
-    // Push constants
+void vulkan_create_pipeline_layout() {
     VkPushConstantRange push_const_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
         .size = sizeof(shader_push_constants_t)
     };
-
-	VkPipelineLayoutCreateInfo pipeline_layout_info = {
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = 0,
 		.pushConstantRangeCount = 1,
 		.pPushConstantRanges = &push_const_range
 	};
+
 	if (vkCreatePipelineLayout(device, &pipeline_layout_info, NULL, &pipeline_layout) != VK_SUCCESS) {
 		log_msg(SEVERITY_ERROR, "Unable to create pipeline layout!\n");
 		exit(-1);
 	}
-
-	VkGraphicsPipelineCreateInfo pipeline_info = {
-		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-		.pNext = &render_info,
-		.stageCount = 2,
-		.pStages = shader_stages,
-		.pVertexInputState = &vert_in_info,
-		.pInputAssemblyState = &in_assembly_info,
-		.pViewportState = &viewport_info,
-		.pRasterizationState = &raster_info,
-		.pMultisampleState = &multisample_info,
-		.pDepthStencilState = &depth_stencil_info,
-		.pColorBlendState = &blend_info,
-		.pDynamicState = &dynamic_state_info,
-		.layout = pipeline_layout,
-		.renderPass = VK_NULL_HANDLE,
-	};
-	if (vkCreateGraphicsPipelines(device, NULL, 1, &pipeline_info, NULL, &pipeline) != VK_SUCCESS) {
-		log_msg(SEVERITY_ERROR, "Error creating pipeline!\n");
-	}
-    log_msg(SEVERITY_INFO, "Created pipeline!\n");
 }
-
-// }}}
 
 void vulkan_create_sync_resources() {
     VkSemaphoreTypeCreateInfo sem_type_info = {
@@ -742,16 +682,14 @@ void vulkan_init(GLFWwindow *window, const char *title, uint32_t vk_version, uin
     vulkan_find_physical_device();
     vulkan_find_graphics_queue();
     vulkan_create_device();
-    volkLoadDevice(device);
     vulkan_init_vma(vk_version);
 
     log_msg(SEVERITY_INFO, "VSync is set to %s!\n", vsync ? "true" : "false");
     vulkan_create_swapchain(width, height, vsync);
     log_msg(SEVERITY_INFO, "Created swapchain!\n");
 
-    vulkan_create_shader("shaders/", "shader.vert", "shaders/", "shader.frag");
+    vulkan_create_pipeline_layout();
 
-    vulkan_create_gfx_pipeline();
     vulkan_create_sync_resources();
     vulkan_create_command_buffers();
     log_msg(SEVERITY_INFO, "Initialized Vulkan!\n");
@@ -783,22 +721,9 @@ void vulkan_destroy() {
         timeline_sem = NULL;
     }
 
-    if (pipeline) {
-        vkDestroyPipeline(device, pipeline, NULL);
-        pipeline = NULL;
-    }
     if (pipeline_layout) {
         vkDestroyPipelineLayout(device, pipeline_layout, NULL);
         pipeline_layout = NULL;
-    }
-
-    if (vert_shader) {
-        vkDestroyShaderModule(device, vert_shader, NULL);
-        vert_shader = NULL;
-    }
-    if (frag_shader) {
-        vkDestroyShaderModule(device, frag_shader, NULL);
-        frag_shader = NULL;
     }
 
     vulkan_destroy_swapchain();
@@ -1047,8 +972,6 @@ bool vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t 
         .minDepth = 0.0f, 
         .maxDepth = 1.0f
     };
-    vkCmdSetViewport(cur_res->buffer, 0, 1, &viewport);
-
     VkRect2D scissor = {
         .offset = { 
             .x = 0, 
@@ -1059,9 +982,76 @@ bool vulkan_begin(bool *req_swapchain_recreate, color_t bg_color_norm, uint32_t 
             .height = swapchain_height 
         }
     };
-    vkCmdSetScissor(cur_res->buffer, 0, 1, &scissor);
+    
+    // Viewport & Scissor
+    vkCmdSetViewportWithCountEXT(cur_res->buffer, 1, &viewport);
+    vkCmdSetScissorWithCountEXT(cur_res->buffer, 1, &scissor);
 
-    vkCmdBindPipeline(cur_res->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    // Input Assembly & Rasterizer
+    vkCmdSetPrimitiveTopology(cur_res->buffer, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    vkCmdSetPrimitiveRestartEnable(cur_res->buffer, VK_FALSE);
+    vkCmdSetCullMode(cur_res->buffer, VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(cur_res->buffer, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetRasterizerDiscardEnable(cur_res->buffer, VK_FALSE);
+
+    // Depth & Stencil
+    vkCmdSetDepthTestEnable(cur_res->buffer, VK_FALSE);
+    vkCmdSetDepthWriteEnable(cur_res->buffer, VK_TRUE);
+    vkCmdSetDepthCompareOp(cur_res->buffer, VK_COMPARE_OP_LESS);
+    vkCmdSetStencilTestEnable(cur_res->buffer, VK_FALSE);
+    vkCmdSetDepthBiasEnable(cur_res->buffer, VK_FALSE);
+
+    // Polygon Mode & MSAA
+    vkCmdSetPolygonModeEXT(cur_res->buffer, VK_POLYGON_MODE_FILL);
+    vkCmdSetRasterizationSamplesEXT(cur_res->buffer, VK_SAMPLE_COUNT_1_BIT);
+    VkSampleMask sample_mask = 0xFFFFFFFF;
+    vkCmdSetSampleMaskEXT(cur_res->buffer, VK_SAMPLE_COUNT_1_BIT, &sample_mask);
+    vkCmdSetAlphaToCoverageEnableEXT(cur_res->buffer, VK_FALSE);
+    vkCmdSetAlphaToOneEnableEXT(cur_res->buffer, VK_FALSE);
+
+    // Color Blend
+    VkColorBlendEquationEXT blend_equation = {
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD
+    };
+    vkCmdSetColorBlendEquationEXT(cur_res->buffer, 0, 1, &blend_equation);
+    VkColorComponentFlags color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    vkCmdSetColorWriteMaskEXT(cur_res->buffer, 0, 1, &color_write_mask);
+    VkBool32 blend_enable = VK_TRUE;
+    vkCmdSetColorBlendEnableEXT(cur_res->buffer, 0, 1, &blend_enable);
+
+    // Vertex Input
+    VkVertexInputBindingDescription2EXT binding_desc = {
+        .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+        .pNext = NULL,
+        .binding = 0,
+        .stride = sizeof(vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        .divisor = 1
+    };
+    VkVertexInputAttributeDescription2EXT attribute_descs[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            .pNext = NULL,
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vertex_t, pos)
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            .pNext = NULL,
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32_UINT,
+            .offset = offsetof(vertex_t, instance_id)
+        }
+    };
+    vkCmdSetVertexInputEXT(cur_res->buffer, 1, &binding_desc, 2, attribute_descs);
 
     return true;
 }
