@@ -9,7 +9,7 @@ In this example, a blue square on the top left corner will be drawn on a black b
 with Vulkan.
 
 ```c
-#include "../cplvk/cplvk.h
+#include "../cplvk/cplvk.h"
 
 int main(void) {
     enable_vsync(false);
